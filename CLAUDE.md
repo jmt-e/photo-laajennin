@@ -38,6 +38,11 @@ serve files as they are. The site URL is
 `https://jmt-e.github.io/photo-laajennin/` (repo `jmt-e/photo-laajennin`), so all paths in the app are
 relative.
 
+The repo is public because free GitHub Pages needs that (photos are never
+in the repo, only code). The owner may later switch to a private repo hosted
+on Netlify, like their other project Vahti. The app needs no build, so
+Netlify would just publish the repo root.
+
 GitHub Pages can't set HTTP headers, so the CSP is a `<meta>` tag. That tag
 covers the page itself; the Web Worker gets its own policy from headers,
 which Pages doesn't send. The worker only runs our own code, so this is
