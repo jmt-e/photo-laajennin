@@ -12,7 +12,7 @@ happens on the phone, including the AI. Works offline once installed.
 
 ## Install on iPhone
 
-1. Open the site in Safari.
+1. Open https://jmt-e.github.io/photo-laajennin/ in Safari.
 2. Tap the Share button, then **Add to Home Screen**.
 
 ## Privacy
