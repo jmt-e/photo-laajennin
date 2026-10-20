@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- Only this site's own files may load. Nothing can be sent to any
+       other server (connect-src 'self'). WebAssembly runs the AI model. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Photo Enhancer</title>
+  <meta name="description" content="Enhance photos privately. Everything happens on your phone.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f4f4f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Enhance">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Photo Enhancer</h1>
+    <p id="status" role="status" aria-live="polite"></p>
+  </header>
+
+  <main id="stage">
+    <div id="empty" class="empty">
+      <svg viewBox="0 0 24 24" class="empty-icon" aria-hidden="true"><path d="M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
+      <p>Your photos never leave this phone.</p>
+      <label for="file" class="button primary big">Choose a photo</label>
+    </div>
+    <div id="frame" class="frame" hidden>
+      <canvas id="after" aria-label="Edited photo"></canvas>
+      <canvas id="before" aria-label="Original photo" hidden></canvas>
+      <div id="divider" class="divider" hidden><span></span></div>
+      <span id="tag-before" class="tag left" hidden>Before</span>
+      <span id="tag-after" class="tag right" hidden>After</span>
+    </div>
+    <div id="busy" class="busy" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="busy-text">Working…</p>
+      <progress id="busy-progress" max="1" value="0" hidden></progress>
+    </div>
+  </main>
+
+  <section id="panel-sharpen" class="panel" hidden aria-label="Sharpen">
+    <label class="slider-label" for="sharpen-amount">Sharpen <output id="sharpen-value">50</output></label>
+    <input type="range" id="sharpen-amount" min="0" max="100" step="1" value="50">
+    <div class="panel-actions">
+      <button type="button" data-cancel>Cancel</button>
+      <button type="button" class="primary" data-apply>Apply</button>
+    </div>
+  </section>
+
+  <section id="panel-bg" class="panel" hidden aria-label="Background">
+    <div class="segmented" role="group" aria-label="New background">
+      <button type="button" data-bg="transparent">Transparent</button>
+      <button type="button" data-bg="color">Colour</button>
+      <button type="button" data-bg="blur">Blur</button>
+    </div>
+    <div id="bg-colors" class="swatches" hidden>
+      <button type="button" data-color="#ffffff" aria-label="White"></button>
+      <button type="button" data-color="#000000" aria-label="Black"></button>
+      <button type="button" data-color="#d9d9de" aria-label="Light grey"></button>
+      <button type="button" data-color="#2f6fde" aria-label="Blue"></button>
+      <button type="button" data-color="#f2c1cf" aria-label="Pink"></button>
+      <button type="button" data-color="#f7e3b5" aria-label="Sand"></button>
+      <label class="custom-color" aria-label="Pick any colour"><input type="color" id="bg-custom" value="#7fb77e"></label>
+    </div>
+    <div class="panel-actions">
+      <button type="button" data-cancel>Cancel</button>
+      <button type="button" class="primary" data-apply>Apply</button>
+    </div>
+  </section>
+
+  <nav class="bar" aria-label="Tools">
+    <div class="row secondary">
+      <button type="button" id="undo" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/></svg>Undo</button>
+      <button type="button" id="reset" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 109-9 9.7 9.7 0 00-6.7 2.7L3 8"/><path d="M3 3v5h5"/></svg>Reset</button>
+      <button type="button" id="compare" aria-pressed="false" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 2v20"/></svg>Compare</button>
+      <button type="button" id="save" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M5 13v6a2 2 0 002 2h10a2 2 0 002-2v-6"/></svg>Save</button>
+    </div>
+    <div class="row tools">
+      <label for="file" class="button" id="open">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>Photo</label>
+      <button type="button" id="auto" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15v6M16 18h6"/></svg>Auto</button>
+      <button type="button" id="sharpen" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2L3 21h18z"/><path d="M12 9v8"/></svg>Sharpen</button>
+      <button type="button" id="background" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/><path d="M2 2l20 20" class="slash"/></svg>Background</button>
+    </div>
+  </nav>
+
+  <input type="file" id="file" accept="image/*" class="visually-hidden">
+
+  <div id="save-sheet" class="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="save-title">
+    <p id="save-title">Press and hold the photo, then tap <b>Save to Photos</b>.</p>
+    <img id="save-img" alt="Your edited photo">
+    <button type="button" id="save-close" class="primary">Done</button>
+  </div>
+</body>
+</html>
