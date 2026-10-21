@@ -57,7 +57,7 @@ app.js                 UI: history (Undo/Reset), panels, compare, save
 engine/engine.js       THE engine API. The app only talks to this.
 engine/worker.js       runs engine jobs in a Web Worker, loads the AI model
 engine/ops.js          pure pixel functions (no DOM): sharpen, auto-enhance,
-                       resize, mask refinement, background compositing
+                       text clean-up, resize, mask refinement, backgrounds
 sw.js                  service worker: offline cache
 manifest.webmanifest   PWA manifest
 icons/                 app icons (generated, simple sparkle)
@@ -69,7 +69,8 @@ tests/                 node tests + Playwright browser test (dev only)
 ### Engine
 
 `engine/engine.js` exports `engine` with `sharpen`, `autoEnhance`,
-`segment` (AI mask), `composite` (new background) and `isModelCached`.
+`enhanceText`, `segment` (AI mask), `composite` (new background) and
+`isModelCached`.
 Images are plain `{ width, height, data }` RGBA objects. Today each call is
 a message to `engine/worker.js`. In phase 3 a second transport can send the
 same calls to the PC instead; the app shouldn't need to change. Keep all
@@ -84,6 +85,29 @@ pixel work behind this module.
   and Reset.
 - Tools with settings (Sharpen, Background) show a live preview in a
   bottom panel; Apply commits it, Cancel drops it.
+
+### Text tool (readable text from blurry, zoomed photos)
+
+Owner's use case: a photo of text taken with big zoom, too blurry to read.
+`ops.enhanceText`, no AI, all classic image processing:
+1. Light text on a dark background is detected (median brightness) and
+   flipped, so everything below works on dark ink on light paper.
+2. Paper estimate (brightest value per block, smoothed) is divided out:
+   uneven light and tinted paper become plain white.
+3. Light denoise, then Richardson-Lucy deconvolution (`ops.deblur`,
+   Gaussian blur model, 12 rounds) to undo the blur. The slider ("How
+   blurry is it?") sets the assumed blur size. Too high on a sharp photo
+   makes thin strokes break up.
+4. Contrast stretch (1st percentile = black, 60th = white).
+5. Black & white: soft threshold. Colour: the photo's smoothed colour
+   differences are added back, so coloured ink keeps its colour.
+
+Speed: big photos are processed at half size and enlarged with bicubic
+before the threshold (blurry text loses nothing, ~4x faster; under 1 s for
+2048 px in desktop Chromium). Photos up to 1024 px come back 2x larger.
+The slider updates on release, not while dragging. Tested on synthetic
+zoomed-text images and a real book page; an AI text model could do better
+on extreme blur later (see roadmap).
 
 ### Background removal
 
@@ -140,11 +164,16 @@ auto-enhance, AI background removal with transparent/colour/blur
 backgrounds, Undo/Reset, before/after slider, save via share sheet,
 offline PWA, engine module).
 
+Done: **Text tool** for blurry zoomed photos of text (colour or black &
+white, blur-size slider).
+
 Next, on the phone:
 - Crop and rotate
 - Filters
 - Light 2× upscaling
 - Noise removal
+- Pinch to zoom the result in the app (useful for reading text)
+- Text: crop to just the text first; maybe an AI model for extreme blur
 
 Phase 2: a Python program on the owner's Windows PC for heavy AI work:
 - rembg for better background removal

@@ -12,27 +12,39 @@ export function makeImage(width, height, data) {
 // ---------- blur helpers (on Float32 planes) ----------
 
 // Box blur with radius r along rows, then columns. Edges are clamped.
+// Both passes walk memory row by row (fast); edge clamping is kept out of
+// the inner loops.
 function boxBlurH(src, dst, w, h, r) {
   const scale = 1 / (2 * r + 1);
   for (let y = 0; y < h; y++) {
     const row = y * w;
-    let acc = src[row] * (r + 1);
-    for (let i = 1; i <= r; i++) acc += src[row + Math.min(i, w - 1)];
+    const first = src[row];
+    const last = src[row + w - 1];
+    let acc = first * (r + 1);
+    for (let i = 1; i <= r; i++) acc += i < w ? src[row + i] : last;
     for (let x = 0; x < w; x++) {
       dst[row + x] = acc * scale;
-      acc += src[row + Math.min(x + r + 1, w - 1)] - src[row + Math.max(x - r, 0)];
+      const add = x + r + 1 < w ? src[row + x + r + 1] : last;
+      const sub = x - r >= 0 ? src[row + x - r] : first;
+      acc += add - sub;
     }
   }
 }
 
-function boxBlurV(src, dst, w, h, r) {
+function boxBlurV(src, dst, w, h, r, acc) {
   const scale = 1 / (2 * r + 1);
-  for (let x = 0; x < w; x++) {
-    let acc = src[x] * (r + 1);
-    for (let i = 1; i <= r; i++) acc += src[Math.min(i, h - 1) * w + x];
-    for (let y = 0; y < h; y++) {
-      dst[y * w + x] = acc * scale;
-      acc += src[Math.min(y + r + 1, h - 1) * w + x] - src[Math.max(y - r, 0) * w + x];
+  for (let x = 0; x < w; x++) acc[x] = src[x] * (r + 1);
+  for (let i = 1; i <= r; i++) {
+    const row = Math.min(i, h - 1) * w;
+    for (let x = 0; x < w; x++) acc[x] += src[row + x];
+  }
+  for (let y = 0; y < h; y++) {
+    const out = y * w;
+    const add = Math.min(y + r + 1, h - 1) * w;
+    const sub = Math.max(y - r, 0) * w;
+    for (let x = 0; x < w; x++) {
+      dst[out + x] = acc[x] * scale;
+      acc[x] += src[add + x] - src[sub + x];
     }
   }
 }
@@ -43,16 +55,23 @@ export function boxBlur(plane, w, h, r) {
   const tmp = new Float32Array(w * h);
   const out = new Float32Array(w * h);
   boxBlurH(plane, tmp, w, h, r);
-  boxBlurV(tmp, out, w, h, r);
+  boxBlurV(tmp, out, w, h, r, new Float64Array(w));
   return out;
 }
 
 // Three box passes approximate a Gaussian with the given sigma.
 export function gaussianBlur(plane, w, h, sigma) {
   const r = Math.max(1, Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2));
-  let p = plane;
-  for (let i = 0; i < 3; i++) p = boxBlur(p, w, h, r);
-  return p;
+  const a = new Float32Array(w * h);
+  const b = new Float32Array(w * h);
+  const acc = new Float64Array(w);
+  boxBlurH(plane, a, w, h, r);
+  boxBlurV(a, b, w, h, r, acc);
+  boxBlurH(b, a, w, h, r);
+  boxBlurV(a, b, w, h, r, acc);
+  boxBlurH(b, a, w, h, r);
+  boxBlurV(a, b, w, h, r, acc);
+  return b;
 }
 
 function luminance(img) {
@@ -345,4 +364,182 @@ export function composite(img, mask, background) {
     out[j + 3] = 255;
   }
   return makeImage(w, h, out);
+}
+
+// ---------- text ----------
+
+// Catmull-Rom 2x enlargement of a plane (smoother letter edges than bilinear).
+export function upscale2x(src, w, h) {
+  const cr = (t) => [(-t * t * t + 2 * t * t - t) / 2, (3 * t * t * t - 5 * t * t + 2) / 2, (-3 * t * t * t + 4 * t * t + t) / 2, (t * t * t - t * t) / 2];
+  const even = cr(0.75); // output 2i   sits at source i - 0.25
+  const odd = cr(0.25); //  output 2i+1 sits at source i + 0.25
+  const W = 2 * w;
+  const H = 2 * h;
+  const rows = new Float32Array(W * h);
+  for (let y = 0; y < h; y++) {
+    const r = y * w;
+    const at = (x) => src[r + Math.min(w - 1, Math.max(0, x))];
+    for (let i = 0; i < w; i++) {
+      rows[y * W + 2 * i] = even[0] * at(i - 2) + even[1] * at(i - 1) + even[2] * at(i) + even[3] * at(i + 1);
+      rows[y * W + 2 * i + 1] = odd[0] * at(i - 1) + odd[1] * at(i) + odd[2] * at(i + 1) + odd[3] * at(i + 2);
+    }
+  }
+  const out = new Float32Array(W * H);
+  for (let x = 0; x < W; x++) {
+    const at = (y) => rows[Math.min(h - 1, Math.max(0, y)) * W + x];
+    for (let i = 0; i < h; i++) {
+      out[2 * i * W + x] = even[0] * at(i - 2) + even[1] * at(i - 1) + even[2] * at(i) + even[3] * at(i + 1);
+      out[(2 * i + 1) * W + x] = odd[0] * at(i - 1) + odd[1] * at(i) + odd[2] * at(i + 1) + odd[3] * at(i + 2);
+    }
+  }
+  return out;
+}
+
+// Brightest value in each block: for dark text on paper that's the paper.
+function maxPool(src, w, h, block) {
+  const bw = Math.ceil(w / block);
+  const bh = Math.ceil(h / block);
+  const out = new Float32Array(bw * bh);
+  for (let y = 0; y < h; y++) {
+    const by = Math.floor(y / block) * bw;
+    for (let x = 0; x < w; x++) {
+      const i = by + Math.floor(x / block);
+      if (src[y * w + x] > out[i]) out[i] = src[y * w + x];
+    }
+  }
+  return { plane: out, w: bw, h: bh };
+}
+
+// Value below which the given fraction of pixels lie (plane values 0..1).
+function planePercentile(plane, p) {
+  const hist = new Uint32Array(1024);
+  for (const v of plane) hist[Math.min(1023, Math.max(0, Math.round(v * 1023)))]++;
+  const target = plane.length * p;
+  let acc = 0;
+  for (let v = 0; v < 1024; v++) {
+    acc += hist[v];
+    if (acc >= target) return v / 1023;
+  }
+  return 1;
+}
+
+// Richardson-Lucy deconvolution with a Gaussian blur: undoes blur instead
+// of just boosting edges. Works on a plane where the ink is bright.
+export function deblur(plane, w, h, sigma, iterations) {
+  let est = Float32Array.from(plane);
+  const ratio = new Float32Array(plane.length);
+  for (let k = 0; k < iterations; k++) {
+    const blurred = gaussianBlur(est, w, h, sigma);
+    for (let i = 0; i < ratio.length; i++) ratio[i] = plane[i] / Math.max(blurred[i], 1e-3);
+    const corr = gaussianBlur(ratio, w, h, sigma);
+    for (let i = 0; i < est.length; i++) est[i] = Math.min(1.5, est[i] * corr[i]);
+  }
+  return est;
+}
+
+// Make text in a blurry, zoomed photo readable: even out the lighting so
+// the paper turns white, deblur, boost contrast. Small photos come back
+// 2x larger (smoother letters).
+// mode: 'color' keeps coloured ink, 'bw' gives crisp black and white.
+// Light text on a dark background (signs) is detected and handled too.
+// strength: 0..1, more strength assumes a blurrier photo.
+export function enhanceText(img, { mode = 'color', strength = 0.5 } = {}) {
+  const outW = Math.max(img.width, img.height) <= 1024 ? img.width * 2 : img.width;
+  const outH = outW === img.width ? img.height : img.height * 2;
+
+  // The heavy work runs at up to ~1400 px: big photos at half size (blurry
+  // text loses nothing), and the result is enlarged smoothly at the end.
+  const half = Math.max(img.width, img.height) > 1400;
+  const w = half ? Math.ceil(img.width / 2) : img.width;
+  const h = half ? Math.ceil(img.height / 2) : img.height;
+  const n = w * h;
+  const planes = toPlanes(img).map((p) => {
+    for (let i = 0; i < p.length; i++) p[i] /= 255;
+    return half ? resizePlane(p, img.width, img.height, w, h) : p;
+  });
+  const side = Math.max(w, h);
+  let L = new Float32Array(n);
+  for (let i = 0; i < n; i++) L[i] = 0.299 * planes[0][i] + 0.587 * planes[1][i] + 0.114 * planes[2][i];
+
+  // Light text on dark: flip, process as dark-on-light, flip back.
+  const inverted = planePercentile(L, 0.5) < 0.45;
+  if (inverted) for (let i = 0; i < n; i++) L[i] = 1 - L[i];
+
+  // 1. Paper estimate (brightest per block, smoothed): divide it out so
+  //    uneven light and tinted paper become plain white.
+  const block = Math.max(4, Math.round(side / 40));
+  const flatten = (p) => {
+    const pooled = maxPool(p, w, h, block);
+    const paper = resizePlane(gaussianBlur(pooled.plane, pooled.w, pooled.h, 1), pooled.w, pooled.h, w, h);
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = Math.min(1, p[i] / Math.max(paper[i], 0.04));
+    return out;
+  };
+  let q = flatten(L);
+
+  // 2. Calm noise, then deblur the ink.
+  const base = Math.max(0.5, side / 1000);
+  q = gaussianBlur(q, w, h, base * 0.8);
+  const ink = new Float32Array(n);
+  for (let i = 0; i < n; i++) ink[i] = 1.02 - q[i];
+  const sharp = deblur(ink, w, h, base * (1.6 + 4.8 * strength), 12);
+  for (let i = 0; i < n; i++) q[i] = 1 - Math.min(1, sharp[i]);
+
+  // 3. Ink -> black, paper -> white.
+  const black = planePercentile(q, 0.01);
+  const white = Math.max(black + 0.1, Math.min(0.97, planePercentile(q, 0.6)));
+  for (let i = 0; i < n; i++) q[i] = Math.min(1, Math.max(0, (q[i] - black) / (white - black)));
+
+  // Colour: the photo's smoothed colour differences, added back at the end
+  // so red ink stays red while noise and JPEG blocks don't come back.
+  let tint = null;
+  if (mode === 'color' && !inverted) {
+    const sigma = base * 4;
+    const Ls = gaussianBlur(flatten(L), w, h, sigma);
+    tint = planes.map((pc) => {
+      const cs = gaussianBlur(flatten(pc), w, h, sigma);
+      for (let i = 0; i < n; i++) cs[i] -= Ls[i];
+      return resizePlane(cs, w, h, outW, outH);
+    });
+  }
+
+  // 4. Back to full size with smooth (bicubic) edges.
+  if (outW !== w) q = cropPlane(upscale2x(q, w, h), 2 * w, outW, outH);
+  const m = outW * outH;
+
+  // 5. Black and white: soft threshold, so letters keep smooth edges.
+  //    Colour: light grey speckles left by the deblur go to white.
+  if (mode === 'bw') {
+    const soft = 0.12;
+    for (let i = 0; i < m; i++) {
+      const t = Math.min(1, Math.max(0, (q[i] - 0.5 + soft) / (2 * soft)));
+      q[i] = t * t * (3 - 2 * t);
+    }
+  } else {
+    for (let i = 0; i < m; i++) q[i] = Math.min(1, Math.max(0, q[i] / 0.8));
+  }
+  if (inverted) for (let i = 0; i < m; i++) q[i] = 1 - q[i];
+
+  const res = makeImage(outW, outH);
+  const d = res.data;
+  for (let i = 0, j = 0; i < m; i++, j += 4) {
+    const v = q[i] * 255;
+    if (tint) {
+      d[j] = v + tint[0][i] * 255;
+      d[j + 1] = v + tint[1][i] * 255;
+      d[j + 2] = v + tint[2][i] * 255;
+    } else {
+      d[j] = d[j + 1] = d[j + 2] = v;
+    }
+    d[j + 3] = 255;
+  }
+  return res;
+}
+
+// Top-left w x h part of a plane that is srcW wide.
+function cropPlane(src, srcW, w, h) {
+  if (srcW === w && src.length === w * h) return src;
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) out.set(src.subarray(y * srcW, y * srcW + w), y * w);
+  return out;
 }

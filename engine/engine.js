@@ -52,6 +52,10 @@ export const engine = {
 
   autoEnhance: (image) => call('autoEnhance', { image: plain(image) }),
 
+  // Readable text from a blurry, zoomed photo. mode: 'color' | 'bw',
+  // strength 0..1 (how blurry the photo is). Small photos come back 2x larger.
+  enhanceText: (image, mode, strength) => call('enhanceText', { image: plain(image), mode, strength }),
+
   // Finds the main subject. Returns a mask (one byte per pixel).
   // onProgress gets { phase: 'download', loaded, total } the first time
   // (AI files are being fetched), then { phase: 'start' } and { phase: 'run' }.

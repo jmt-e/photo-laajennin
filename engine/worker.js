@@ -75,6 +75,7 @@ function loadSession(report) {
 const handlers = {
   sharpen: ({ image, amount }) => ops.sharpen(image, { amount }),
   autoEnhance: ({ image }) => ops.autoEnhance(image),
+  enhanceText: ({ image, mode, strength }) => ops.enhanceText(image, { mode, strength }),
   composite: ({ image, mask, background }) => ops.composite(image, mask, background),
   async segment({ image }, report) {
     const session = await loadSession(report);

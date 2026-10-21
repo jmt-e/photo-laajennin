@@ -131,3 +131,70 @@ test('composite: transparent, colour and blur', () => {
   assert.ok(b.data[(10 * w + 13) * 4] < 60, 'no halo from the subject');
   assert.equal(b.data[3], 255);
 });
+
+// Dark "text" bars on light, uneven paper, blurred like a zoomed photo.
+function blurryText(w, h, { light = false } = {}) {
+  const ink = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const bar = y > h * 0.3 && y < h * 0.7 && x % 40 < 12 && x > 20 && x < w - 20;
+    ink[y * w + x] = bar ? 1 : 0;
+  }
+  const blurred = ops.gaussianBlur(ink, w, h, 4);
+  const img = ops.makeImage(w, h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    const paper = 200 * (0.6 + 0.4 * (x / w)); // light falls off to the left
+    const v = light ? 30 + 200 * blurred[i] : paper * (1 - 0.6 * blurred[i]);
+    img.data.set([v, v * 0.97, v * 0.9, 255], i * 4);
+  }
+  return img;
+}
+
+function contrastAcross(img, row) {
+  // Gap brightness minus bar brightness (bars span x % 40 < 12).
+  const w = img.width;
+  const at = (x) => img.data[(row * w + x) * 4];
+  const bars = [];
+  const gaps = [];
+  for (let x = 60; x < w - 60; x += 40) {
+    gaps.push(at(x + 6));
+    bars.push(at(x + 26));
+  }
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  return mean(gaps) - mean(bars);
+}
+
+test('enhanceText: whiter paper, darker ink, more contrast', () => {
+  const img = blurryText(1200, 200);
+  const before = contrastAcross(img, 100);
+  for (const mode of ['color', 'bw']) {
+    const out = ops.enhanceText(img, { mode, strength: 0.5 });
+    assert.equal(out.width, 1200, 'big photos keep their size');
+    const after = contrastAcross(out, 100);
+    assert.ok(after > before * 1.5, `${mode}: contrast ${before.toFixed(0)} -> ${after.toFixed(0)}`);
+    // Paper far from text is white on both the dark and light side.
+    assert.ok(out.data[(10 * 1200 + 5) * 4] > 235, `${mode}: dark-side paper turns white`);
+    assert.ok(out.data[(10 * 1200 + 1190) * 4] > 235, `${mode}: light-side paper white`);
+  }
+});
+
+test('enhanceText: light text on dark stays light on dark', () => {
+  const img = blurryText(1200, 200, { light: true });
+  const out = ops.enhanceText(img, { mode: 'bw', strength: 0.5 });
+  assert.ok(out.data[(10 * 1200 + 600) * 4] < 30, 'background dark');
+  assert.ok(contrastAcross(out, 100) < -150, 'bars bright');
+});
+
+test('enhanceText: small photos are enlarged 2x', () => {
+  const img = blurryText(300, 80);
+  const out = ops.enhanceText(img, { mode: 'bw', strength: 0.5 });
+  assert.equal(out.width, 600);
+  assert.equal(out.height, 160);
+});
+
+test('upscale2x keeps flat areas and doubles size', () => {
+  const p = new Float32Array(10 * 6).fill(0.3);
+  const out = ops.upscale2x(p, 10, 6);
+  assert.equal(out.length, 20 * 12);
+  for (const v of out) assert.ok(Math.abs(v - 0.3) < 1e-5);
+});

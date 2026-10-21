@@ -289,10 +289,14 @@ button svg,
   background: transparent;
 }
 
+.row.tools {
+  grid-template-columns: repeat(5, 1fr);
+}
+
 .row.tools button,
 .row.tools .button {
   background: var(--button);
-  font-size: 12px;
+  font-size: 11px;
   min-height: 60px;
 }
 
@@ -339,6 +343,14 @@ input[type="range"] {
   padding: 3px;
   border-radius: 12px;
   background: var(--button);
+}
+
+.segmented.two {
+  grid-template-columns: 1fr 1fr;
+}
+
+.slider-label.spaced {
+  margin-top: 12px;
 }
 
 .segmented button {

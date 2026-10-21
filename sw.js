@@ -3,7 +3,7 @@
 // time background removal is used, in the 'ai-v1' cache.
 //
 // Bump VERSION whenever any file in SHELL changes, or phones keep the old copy.
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL_CACHE = `shell-${VERSION}`;
 const SHELL = [
   './',

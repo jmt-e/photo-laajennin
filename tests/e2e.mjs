@@ -70,6 +70,28 @@ try {
   await page.waitForSelector('#panel-sharpen', { state: 'hidden' });
   step('sharpen with slider');
 
+  await page.click('#text');
+  await page.waitForSelector('#panel-text:not([hidden])');
+  await idle();
+  const colourText = await pixels();
+  await page.click('[data-text-mode="bw"]');
+  await idle();
+  const [r, g, b] = await pixels();
+  assert.ok(r === g && g === b, 'black & white is grey');
+  await page.$eval('#text-strength', (s) => {
+    s.value = '70';
+    s.dispatchEvent(new Event('input'));
+    s.dispatchEvent(new Event('change'));
+  });
+  await idle();
+  await page.screenshot({ path: `${shots}/2b-text.png` });
+  await page.click('#panel-text [data-apply]');
+  await page.waitForSelector('#panel-text', { state: 'hidden' });
+  assert.equal(await page.textContent('#status'), 'Text made clearer');
+  await page.click('#undo');
+  assert.notDeepEqual(colourText, [r, g, b]);
+  step('text: colour, black & white, strength, apply, undo');
+
   let sawProgress = false;
   const watch = setInterval(async () => {
     if (await page.isVisible('#busy-progress').catch(() => false)) sawProgress = true;

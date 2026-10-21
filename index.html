@@ -57,6 +57,19 @@
     </div>
   </section>
 
+  <section id="panel-text" class="panel" hidden aria-label="Clearer text">
+    <div class="segmented two" role="group" aria-label="Result">
+      <button type="button" data-text-mode="color">Colour</button>
+      <button type="button" data-text-mode="bw">Black &amp; white</button>
+    </div>
+    <label class="slider-label spaced" for="text-strength">How blurry is it? <output id="text-value">40</output></label>
+    <input type="range" id="text-strength" min="0" max="100" step="1" value="40">
+    <div class="panel-actions">
+      <button type="button" data-cancel>Cancel</button>
+      <button type="button" class="primary" data-apply>Apply</button>
+    </div>
+  </section>
+
   <section id="panel-bg" class="panel" hidden aria-label="Background">
     <div class="segmented" role="group" aria-label="New background">
       <button type="button" data-bg="transparent">Transparent</button>
@@ -96,6 +109,8 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15v6M16 18h6"/></svg>Auto</button>
       <button type="button" id="sharpen" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2L3 21h18z"/><path d="M12 9v8"/></svg>Sharpen</button>
+      <button type="button" id="text" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h11M9.5 5v14"/><path d="M15 12h6M15 16h6M15 20h6"/></svg>Text</button>
       <button type="button" id="background" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/><path d="M2 2l20 20" class="slash"/></svg>Background</button>
     </div>

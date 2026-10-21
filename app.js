@@ -28,6 +28,10 @@ const el = {
   panelSharpen: $('panel-sharpen'),
   sharpenAmount: $('sharpen-amount'),
   sharpenValue: $('sharpen-value'),
+  text: $('text'),
+  panelText: $('panel-text'),
+  textStrength: $('text-strength'),
+  textValue: $('text-value'),
   panelBg: $('panel-bg'),
   bgColors: $('bg-colors'),
   bgCustom: $('bg-custom'),
@@ -40,7 +44,7 @@ const state = {
   original: null, // the photo as loaded (after shrinking)
   history: [], // edits; the last one is what you see
   preview: null, // shown while a tool panel is open, not yet applied
-  panel: null, // 'sharpen' | 'bg' | null
+  panel: null, // 'sharpen' | 'text' | 'bg' | null
   busy: false,
   comparing: false,
   split: 0.5, // compare divider position, 0..1
@@ -79,6 +83,7 @@ function updateButtons() {
   el.save.disabled = !(free && has);
   el.auto.disabled = !(free && has);
   el.sharpen.disabled = !(free && has);
+  el.text.disabled = !(free && has);
   el.background.disabled = !(free && has);
   el.file.disabled = !free;
   $('open').setAttribute('aria-disabled', String(!free));
@@ -259,76 +264,122 @@ el.auto.addEventListener('click', async () => {
 });
 
 // Panels: a tool shows a live preview; Apply keeps it, Cancel drops it.
+const panels = { sharpen: el.panelSharpen, text: el.panelText, bg: el.panelBg };
+const applied = { sharpen: 'Sharpened', text: 'Text made clearer', bg: 'Background changed' };
+
 function openPanel(name) {
   state.panel = name;
-  el.panelSharpen.hidden = name !== 'sharpen';
-  el.panelBg.hidden = name !== 'bg';
+  for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== name;
   updateButtons();
 }
 
 function closePanel() {
   state.panel = null;
   state.preview = null;
-  el.panelSharpen.hidden = true;
-  el.panelBg.hidden = true;
+  for (const panel of Object.values(panels)) panel.hidden = true;
   render();
 }
 
-for (const panel of [el.panelSharpen, el.panelBg]) {
+// Re-runs a tool as its settings change. Never queues more than one extra
+// job; a newer setting simply replaces the waiting one.
+function livePreview(name, compute, busyLabel) {
+  let loop = null;
+  let again = false;
+  async function work() {
+    do {
+      again = false;
+      const base = current();
+      if (busyLabel) setBusy(busyLabel);
+      try {
+        const out = await compute(base);
+        if (state.panel === name && current() === base) {
+          state.preview = out;
+          render();
+        }
+      } catch (err) {
+        setStatus(err.message, true);
+      } finally {
+        if (busyLabel) setBusy(null);
+      }
+    } while (again && state.panel === name);
+  }
+  return {
+    request() {
+      if (loop) {
+        again = true;
+        return;
+      }
+      loop = work().finally(() => {
+        loop = null;
+      });
+    },
+    settled: () => loop || Promise.resolve(),
+  };
+}
+
+const previews = {};
+
+for (const [name, panel] of Object.entries(panels)) {
   panel.querySelector('[data-cancel]').addEventListener('click', closePanel);
   panel.querySelector('[data-apply]').addEventListener('click', async () => {
-    // Wait for the slider's latest preview, so what you saw is what you get.
-    if (state.panel === 'sharpen' && sharpenLoop) await sharpenLoop;
+    // Wait for the latest preview, so what you saw is what you get.
+    if (previews[name]) await previews[name].settled();
     const img = state.preview;
-    const name = state.panel;
     closePanel();
     if (img) {
       commit(img);
-      setStatus(name === 'sharpen' ? 'Sharpened' : 'Background changed');
+      setStatus(applied[name]);
     }
   });
 }
 
-// Sharpen: re-run as the slider moves, but never queue up more than one job.
-let sharpenLoop = null;
-let sharpenAgain = false;
-
-function previewSharpen() {
-  if (sharpenLoop) {
-    sharpenAgain = true;
-    return;
-  }
-  sharpenLoop = sharpenWhileMoving().finally(() => {
-    sharpenLoop = null;
-  });
-}
-
-async function sharpenWhileMoving() {
-  do {
-    sharpenAgain = false;
-    const amount = Number(el.sharpenAmount.value) / 50; // 0..2
-    try {
-      const out = await engine.sharpen(current(), amount);
-      if (state.panel === 'sharpen') {
-        state.preview = out;
-        render();
-      }
-    } catch (err) {
-      setStatus(err.message, true);
-    }
-  } while (sharpenAgain && state.panel === 'sharpen');
-}
+// Sharpen: fast, so it follows the slider while you drag.
+previews.sharpen = livePreview('sharpen', (base) => engine.sharpen(base, Number(el.sharpenAmount.value) / 50));
 
 el.sharpen.addEventListener('click', () => {
   openPanel('sharpen');
   el.sharpenValue.textContent = el.sharpenAmount.value;
-  previewSharpen();
+  previews.sharpen.request();
 });
 
 el.sharpenAmount.addEventListener('input', () => {
   el.sharpenValue.textContent = el.sharpenAmount.value;
-  previewSharpen();
+  previews.sharpen.request();
 });
+
+// Text: slower (it deblurs), so it updates when you let go of the slider.
+let textMode = 'color';
+previews.text = livePreview(
+  'text',
+  (base) => engine.enhanceText(base, textMode, Number(el.textStrength.value) / 100),
+  'Making text clearer…',
+);
+
+function showTextMode() {
+  for (const b of el.panelText.querySelectorAll('[data-text-mode]')) {
+    b.setAttribute('aria-pressed', String(b.dataset.textMode === textMode));
+  }
+}
+
+el.text.addEventListener('click', () => {
+  openPanel('text');
+  showTextMode();
+  el.textValue.textContent = el.textStrength.value;
+  previews.text.request();
+});
+
+for (const b of el.panelText.querySelectorAll('[data-text-mode]')) {
+  b.addEventListener('click', () => {
+    textMode = b.dataset.textMode;
+    showTextMode();
+    previews.text.request();
+  });
+}
+
+el.textStrength.addEventListener('input', () => {
+  el.textValue.textContent = el.textStrength.value;
+});
+el.textStrength.addEventListener('change', () => previews.text.request());
 
 // Background removal
 let bgChoice = { type: 'transparent' };

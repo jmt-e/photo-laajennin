@@ -5,6 +5,8 @@ happens on the phone, including the AI. Works offline once installed.
 
 - Auto-enhance: one tap fixes brightness, contrast and colour
 - Sharpen with a strength slider
+- Text: makes blurry, zoomed photos of text readable (colour or black &
+  white)
 - Remove the background (AI on the phone), then choose transparent, a
   colour, or a blurred background
 - Undo, Reset, before/after slider
