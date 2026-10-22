@@ -61,6 +61,9 @@ engine/ops.js          pure pixel functions (no DOM): sharpen, auto-enhance,
 sw.js                  service worker: offline cache
 manifest.webmanifest   PWA manifest
 icons/                 app icons (generated, simple sparkle)
+backgrounds/           built-in scenes (+ -thumb.jpg), drawn by
+                       tools/make_backgrounds.py, no licence questions
+tools/                 dev-only generators (Python), not used by the app
 models/u2netp.onnx     background-removal model (4.6 MB, Apache-2.0)
 vendor/onnxruntime-web ONNX Runtime Web 1.30.0 (MIT), wasm-only build
 tests/                 node tests + Playwright browser test (dev only)
@@ -83,7 +86,7 @@ pixel work behind this module.
 - History keeps up to 10 steps (~12 MB each at 2048²). Reset is a step
   itself, so it can be undone. The original is kept separately for Compare
   and Reset.
-- Tools with settings (Sharpen, Background) show a live preview in a
+- Tools with settings (Sharpen, Text, Background) show a live preview in a
   bottom panel; Apply commits it, Cancel drops it.
 
 ### Text tool (readable text from blurry, zoomed photos)
@@ -116,9 +119,9 @@ on extreme blur later (see roadmap).
   Input 320×320, ImageNet normalisation, first output is the mask.
 - The 320 px mask is upscaled and refined with a guided filter so edges
   follow the photo (`ops.refineMask`).
-- Backgrounds: transparent, solid colour, or a blur of the original
-  (blur excludes the subject to avoid a halo). The mask is cached per image,
-  so switching backgrounds doesn't re-run the AI.
+- Backgrounds: transparent, solid colour, a blur of the original (blur
+  excludes the subject to avoid a halo), or a **scene**. The mask is cached
+  per image, so switching backgrounds doesn't re-run the AI.
 - The model and the ONNX Runtime wasm (~19 MB together) are downloaded the
   first time with a progress bar, then kept in Cache Storage (`ai-v1`) by
   the worker, so it works offline. Their byte sizes are hard-coded in
@@ -128,6 +131,22 @@ on extreme blur later (see roadmap).
   (178 MB, fixed 1024 input; quantised uint8 is 46 MB) gives sharper edges
   but is ~10× slower and risky for iPhone memory. `silueta` was no better
   than u2netp. BiRefNet is too big. Revisit if quality isn't enough.
+
+### Scenes (replace the background)
+
+- Built-in: beach, basketball court, soccer stadium, mountain scenery.
+  Wikimedia/Unsplash/Pexels weren't reachable from Claude's container, so
+  they are drawn procedurally by `tools/make_backgrounds.py` (2048² JPEG,
+  slightly out of focus like portrait mode, plus 192 px thumbnails). To
+  swap one for a real photo, it must be public domain/CC0 (or similar) and
+  keep the same file name. "Your photo" uses any camera-roll picture.
+- `ops.placeOnScene` fits the subject in: scene cropped to cover the frame
+  (`coverScene`), edge alpha corrected by colour where the AI mask spills
+  onto the old background, edge colours solved/filled from inside the
+  subject (no halo), colour and brightness nudged toward the scene, light
+  wrap on the edges, soft contact shadow, and the photo's grain added to
+  the scene. ~2 s for 2048 px in desktop Node.
+- The subject keeps its place and size in the frame (no move/resize yet).
 
 ### Saving
 
@@ -167,6 +186,9 @@ offline PWA, engine module).
 Done: **Text tool** for blurry zoomed photos of text (colour or black &
 white, blur-size slider).
 
+Done: **Scenes**: replace the background with beach, basketball court,
+soccer stadium, scenery or your own photo, with edge/colour/light fitting.
+
 Next, on the phone:
 - Crop and rotate
 - Filters
@@ -174,6 +196,7 @@ Next, on the phone:
 - Noise removal
 - Pinch to zoom the result in the app (useful for reading text)
 - Text: crop to just the text first; maybe an AI model for extreme blur
+- Scenes: move/resize the person; real CC0 photos instead of drawn scenes
 
 Phase 2: a Python program on the owner's Windows PC for heavy AI work:
 - rembg for better background removal

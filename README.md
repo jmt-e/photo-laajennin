@@ -8,7 +8,8 @@ happens on the phone, including the AI. Works offline once installed.
 - Text: makes blurry, zoomed photos of text readable (colour or black &
   white)
 - Remove the background (AI on the phone), then choose transparent, a
-  colour, or a blurred background
+  colour, a blurred background, or a new scene (beach, basketball court,
+  soccer stadium, scenery, or any photo of your own), fitted in smoothly
 - Undo, Reset, before/after slider
 - Save to Photos through the share sheet
 
@@ -23,6 +24,8 @@ No uploads, no analytics, no third-party files. A Content-Security-Policy
 stops the page from contacting any other server.
 
 ## Credits
+
+The built-in scene backgrounds are drawn by `tools/make_backgrounds.py`.
 
 - [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT)
 - [U²-Net](https://github.com/xuebinqin/U-2-Net) model `u2netp` (Apache-2.0),

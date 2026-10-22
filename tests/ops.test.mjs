@@ -198,3 +198,48 @@ test('upscale2x keeps flat areas and doubles size', () => {
   assert.equal(out.length, 20 * 12);
   for (const v of out) assert.ok(Math.abs(v - 0.3) < 1e-5);
 });
+
+test('placeOnScene: no halo from the old background, scene fills the rest', () => {
+  // Dark subject (square) shot against a white wall; the mask has soft,
+  // slightly too wide edges like a real AI mask.
+  const w = 200;
+  const h = 160;
+  const img = ops.makeImage(w, h);
+  const mask = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const inside = x >= 60 && x < 140 && y >= 40;
+      img.data.set(inside ? [60, 40, 30, 255] : [245, 245, 245, 255], (y * w + x) * 4);
+      const dist = Math.max(60 - x, x - 139, 40 - y, 0);
+      mask[y * w + x] = Math.max(0, 255 - dist * 40); // ~6 px soft tail outside
+    }
+  }
+  // A dark green scene of a different size and shape.
+  const scene = ops.makeImage(300, 300);
+  for (let i = 0; i < 300 * 300; i++) scene.data.set([20, 70, 30, 255], i * 4);
+
+  const out = ops.placeOnScene(img, mask, scene);
+  assert.equal(out.width, w);
+  assert.equal(out.height, h);
+  const px = (x, y) => [...out.data.slice((y * w + x) * 4, (y * w + x) * 4 + 3)];
+  // Just outside the subject, where the mask is faint: no white glow.
+  for (const x of [56, 57, 58]) {
+    const [r, g, b] = px(x, 100);
+    assert.ok(r < 90 && g < 110 && b < 80, `no halo at x=${x}: ${[r, g, b]}`);
+  }
+  // Far away: the scene (slightly darkened near the subject is fine).
+  const [r, g, b] = px(5, 5);
+  assert.ok(Math.abs(r - 20) < 12 && Math.abs(g - 70) < 12 && Math.abs(b - 30) < 12, `scene shows: ${[r, g, b]}`);
+  // Middle of the subject: still the subject, only gently colour matched.
+  const [sr, sg] = px(100, 120);
+  assert.ok(Math.abs(sr - 60) < 25 && Math.abs(sg - 40) < 25, `subject kept: ${[sr, sg]}`);
+});
+
+test('coverScene fills the frame without stretching', () => {
+  const scene = ops.makeImage(100, 100);
+  for (let y = 0; y < 100; y++) for (let x = 0; x < 100; x++) scene.data.set([x * 2, y * 2, 0, 255], (y * 100 + x) * 4);
+  const [r, g] = ops.coverScene(scene, 50, 100); // tall frame: crops the sides
+  assert.equal(r.length, 50 * 100);
+  assert.ok(r[0] > 40 && r[49] < 160, 'only the middle columns are used');
+  assert.ok(g[0] < 5 && g[99 * 50] > 190, 'full height kept');
+});

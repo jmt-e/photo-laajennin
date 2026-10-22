@@ -34,6 +34,8 @@ const el = {
   textValue: $('text-value'),
   panelBg: $('panel-bg'),
   bgColors: $('bg-colors'),
+  bgScenes: $('bg-scenes'),
+  sceneFile: $('scene-file'),
   bgCustom: $('bg-custom'),
   saveSheet: $('save-sheet'),
   saveImg: $('save-img'),
@@ -392,6 +394,24 @@ function showBgChoice() {
   for (const b of el.bgColors.querySelectorAll('[data-color]')) {
     b.setAttribute('aria-pressed', String(bgChoice.type === 'color' && b.dataset.color === bgChoice.color));
   }
+  el.bgScenes.hidden = bgChoice.type !== 'scene';
+  for (const b of el.bgScenes.querySelectorAll('[data-scene]')) {
+    b.setAttribute('aria-pressed', String(bgChoice.type === 'scene' && b.dataset.scene === bgChoice.scene));
+  }
+}
+
+// Scenes are photos too: loaded (and shrunk) like one, kept while in use.
+const scenes = new Map(); // name -> image; 'own' is the one you picked
+
+async function sceneImage(name) {
+  if (!scenes.has(name)) {
+    const res = await fetch(`backgrounds/${name}.jpg`);
+    if (!res.ok) throw new Error('Could not load that scene');
+    const { image } = await loadPhoto(await res.blob());
+    for (const key of scenes.keys()) if (key !== 'own') scenes.delete(key); // keep memory low
+    scenes.set(name, image);
+  }
+  return scenes.get(name);
 }
 
 async function previewBg() {
@@ -399,7 +419,11 @@ async function previewBg() {
   const base = current();
   const mask = masks.get(base);
   if (!mask) return;
-  const out = await run('Changing background…', () => engine.composite(base, mask, bgChoice));
+  const choice = bgChoice;
+  const out = await run(choice.type === 'scene' ? 'Fitting you into the scene…' : 'Changing background…', async () => {
+    const background = choice.type === 'scene' ? { type: 'scene', scene: await sceneImage(choice.scene) } : choice;
+    return engine.composite(base, mask, background);
+  });
   if (out && state.panel === 'bg' && current() === base) {
     state.preview = out;
     render();
@@ -431,21 +455,40 @@ el.background.addEventListener('click', async () => {
 for (const b of el.panelBg.querySelectorAll('[data-bg]')) {
   b.addEventListener('click', () => {
     const type = b.dataset.bg;
-    bgChoice = type === 'color' ? { type, color: bgChoice.color || '#ffffff' } : { type, color: bgChoice.color };
+    bgChoice = { type, color: bgChoice.color || '#ffffff', scene: bgChoice.scene || 'beach' };
     previewBg();
   });
 }
 
+for (const b of el.bgScenes.querySelectorAll('button[data-scene]')) {
+  b.addEventListener('click', () => {
+    bgChoice = { ...bgChoice, type: 'scene', scene: b.dataset.scene };
+    previewBg();
+  });
+}
+
+// "Your photo": any picture from the camera roll as the new background.
+el.sceneFile.addEventListener('change', async () => {
+  const file = el.sceneFile.files[0];
+  el.sceneFile.value = '';
+  if (!file) return;
+  const loaded = await run('Opening photo…', () => loadPhoto(file));
+  if (!loaded) return;
+  scenes.set('own', loaded.image);
+  bgChoice = { ...bgChoice, type: 'scene', scene: 'own' };
+  previewBg();
+});
+
 for (const b of el.bgColors.querySelectorAll('[data-color]')) {
   b.style.setProperty('--c', b.dataset.color); // set here: the CSP forbids inline styles
   b.addEventListener('click', () => {
-    bgChoice = { type: 'color', color: b.dataset.color };
+    bgChoice = { ...bgChoice, type: 'color', color: b.dataset.color };
     previewBg();
   });
 }
 
 el.bgCustom.addEventListener('change', () => {
-  bgChoice = { type: 'color', color: el.bgCustom.value };
+  bgChoice = { ...bgChoice, type: 'color', color: el.bgCustom.value };
   previewBg();
 });
 

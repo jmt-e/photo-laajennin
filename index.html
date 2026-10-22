@@ -75,6 +75,15 @@
       <button type="button" data-bg="transparent">Transparent</button>
       <button type="button" data-bg="color">Colour</button>
       <button type="button" data-bg="blur">Blur</button>
+      <button type="button" data-bg="scene">Scene</button>
+    </div>
+    <div id="bg-scenes" class="scenes" hidden>
+      <button type="button" data-scene="beach"><img src="backgrounds/beach-thumb.jpg" alt="">Beach</button>
+      <button type="button" data-scene="basketball-court"><img src="backgrounds/basketball-court-thumb.jpg" alt="">Court</button>
+      <button type="button" data-scene="soccer-stadium"><img src="backgrounds/soccer-stadium-thumb.jpg" alt="">Stadium</button>
+      <button type="button" data-scene="scenery"><img src="backgrounds/scenery-thumb.jpg" alt="">Scenery</button>
+      <label for="scene-file" class="button" id="scene-own" data-scene="own">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>Your photo</label>
     </div>
     <div id="bg-colors" class="swatches" hidden>
       <button type="button" data-color="#ffffff" aria-label="White"></button>
@@ -117,6 +126,7 @@
   </nav>
 
   <input type="file" id="file" accept="image/*" class="visually-hidden">
+  <input type="file" id="scene-file" accept="image/*" class="visually-hidden">
 
   <div id="save-sheet" class="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="save-title">
     <p id="save-title">Press and hold the photo, then tap <b>Save to Photos</b>.</p>

@@ -3,7 +3,7 @@
 // time background removal is used, in the 'ai-v1' cache.
 //
 // Bump VERSION whenever any file in SHELL changes, or phones keep the old copy.
-const VERSION = 'v2';
+const VERSION = 'v3';
 const SHELL_CACHE = `shell-${VERSION}`;
 const SHELL = [
   './',
@@ -19,6 +19,14 @@ const SHELL = [
   'icons/icon-192.png',
   'icons/icon-512.png',
   'icons/apple-touch-icon.png',
+  'backgrounds/beach.jpg',
+  'backgrounds/basketball-court.jpg',
+  'backgrounds/soccer-stadium.jpg',
+  'backgrounds/scenery.jpg',
+  'backgrounds/beach-thumb.jpg',
+  'backgrounds/basketball-court-thumb.jpg',
+  'backgrounds/soccer-stadium-thumb.jpg',
+  'backgrounds/scenery-thumb.jpg',
 ];
 
 self.addEventListener('install', (event) => {

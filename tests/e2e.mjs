@@ -113,6 +113,17 @@ try {
   const blue = await page.$eval('#after', (c) => Array.from(c.getContext('2d').getImageData(5, 5, 1, 1).data));
   assert.deepEqual(blue, [47, 111, 222, 255]);
   await page.screenshot({ path: `${shots}/4-colour.png` });
+  for (const scene of ['beach', 'basketball-court', 'soccer-stadium', 'scenery']) {
+    if (scene === 'beach') await page.click('[data-bg="scene"]');
+    else await page.click(`[data-scene="${scene}"]`);
+    await idle();
+    assert.equal(await page.getAttribute(`[data-scene="${scene}"]`, 'aria-pressed'), 'true');
+    await page.screenshot({ path: `${shots}/5-${scene}.png` });
+  }
+  await page.setInputFiles('#scene-file', photo);
+  await idle();
+  assert.equal(await page.getAttribute('[data-scene="own"]', 'aria-pressed'), 'true');
+  step('scenes: beach, court, stadium, scenery, your own photo');
   await page.click('[data-bg="blur"]');
   await idle();
   await page.screenshot({ path: `${shots}/5-blur.png` });

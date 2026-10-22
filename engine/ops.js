@@ -304,9 +304,48 @@ export function refineMask(pred, size, img) {
   return mask;
 }
 
+// Blur a plane at up to 512 px (fast, little memory) and scale back up.
+// sigmaFrac is the blur size as a fraction of the long side.
+function softBlur(plane, w, h, sigmaFrac) {
+  const f = Math.min(1, 512 / Math.max(w, h));
+  const lw = Math.max(1, Math.round(w * f));
+  const lh = Math.max(1, Math.round(h * f));
+  const small = f < 1 ? resizePlane(plane, w, h, lw, lh) : plane;
+  const blurred = gaussianBlur(small, lw, lh, Math.max(lw, lh) * sigmaFrac);
+  return f < 1 ? resizePlane(blurred, lw, lh, w, h) : blurred;
+}
+
+// The photo's background with the subject removed and the hole filled in
+// from around it: a blur of only the background pixels (weighted by
+// 1 - mask), so the subject's colours don't smear into a halo.
+function backgroundOnly(planes, alpha, w, h, sigmaFrac) {
+  const weight = new Float32Array(w * h);
+  for (let i = 0; i < weight.length; i++) weight[i] = 1 - alpha[i];
+  return fillFrom(planes, weight, w, h, sigmaFrac);
+}
+
+// Colours spread out from where weight is high (normalised blur).
+function fillFrom(planes, weight, w, h, sigmaFrac, minWeight = 0.02) {
+  const wBlur = softBlur(weight, w, h, sigmaFrac);
+  return planes.map((plane) => {
+    const weighted = new Float32Array(plane.length);
+    for (let i = 0; i < plane.length; i++) weighted[i] = plane[i] * weight[i];
+    const wb = softBlur(weighted, w, h, sigmaFrac);
+    const plain = softBlur(plane, w, h, sigmaFrac);
+    for (let i = 0; i < wb.length; i++) wb[i] = wBlur[i] > minWeight ? wb[i] / wBlur[i] : plain[i];
+    return wb;
+  });
+}
+
+function alphaOf(img, mask) {
+  const a = new Float32Array(mask.length);
+  for (let i = 0; i < a.length; i++) a[i] = (mask[i] / 255) * (img.data[i * 4 + 3] / 255);
+  return a;
+}
+
 // Put the cut-out subject on a new background.
 // background: { type: 'transparent' } | { type: 'color', color: '#rrggbb' }
-//           | { type: 'blur' }
+//           | { type: 'blur' } | { type: 'scene', scene: image }
 export function composite(img, mask, background) {
   const { width: w, height: h, data: d } = img;
   const out = new Uint8ClampedArray(d.length);
@@ -321,6 +360,7 @@ export function composite(img, mask, background) {
     }
     return makeImage(w, h, out);
   }
+  if (type === 'scene') return placeOnScene(img, mask, background.scene);
 
   let bg;
   if (type === 'color') {
@@ -328,29 +368,7 @@ export function composite(img, mask, background) {
     const rgb = [0, 2, 4].map((k) => parseInt(hex.slice(k, k + 2), 16));
     bg = (c) => rgb[c];
   } else if (type === 'blur') {
-    // A blurred background doesn't need full resolution: blur at up to
-    // 512 px (fast, little memory) and scale back up.
-    const f = Math.min(1, 512 / Math.max(w, h));
-    const lw = Math.max(1, Math.round(w * f));
-    const lh = Math.max(1, Math.round(h * f));
-    const sigma = Math.max(lw, lh) * 0.012;
-    // Blur only the background (weighted by 1 - mask), so the subject's
-    // colours don't smear into a halo around it.
-    const weightFull = new Float32Array(w * h);
-    for (let i = 0; i < weightFull.length; i++) weightFull[i] = 1 - mask[i] / 255;
-    const weight = resizePlane(weightFull, w, h, lw, lh);
-    const wBlur = gaussianBlur(weight, lw, lh, sigma);
-    const planes = toPlanes(img).map((plane) => {
-      const small = resizePlane(plane, w, h, lw, lh);
-      const weighted = new Float32Array(small.length);
-      for (let i = 0; i < small.length; i++) weighted[i] = small[i] * weight[i];
-      const wb = gaussianBlur(weighted, lw, lh, sigma);
-      const plain = gaussianBlur(small, lw, lh, sigma);
-      for (let i = 0; i < wb.length; i++) {
-        wb[i] = wBlur[i] > 0.02 ? wb[i] / wBlur[i] : plain[i];
-      }
-      return resizePlane(wb, lw, lh, w, h);
-    });
+    const planes = backgroundOnly(toPlanes(img), alphaOf(img, mask), w, h, 0.012);
     bg = (c, i) => planes[c][i];
   } else {
     throw new Error('Unknown background: ' + type);
@@ -364,6 +382,142 @@ export function composite(img, mask, background) {
     out[j + 3] = 255;
   }
   return makeImage(w, h, out);
+}
+
+// Scale a scene to cover w x h (like CSS background-size: cover), centred
+// sideways and a little below centre, so more ground than sky is kept.
+export function coverScene(scene, w, h) {
+  const scale = Math.max(w / scene.width, h / scene.height);
+  const cw = Math.min(scene.width, Math.round(w / scale));
+  const ch = Math.min(scene.height, Math.round(h / scale));
+  const x0 = Math.floor((scene.width - cw) / 2);
+  const y0 = Math.floor((scene.height - ch) * 0.6);
+  return toPlanes(scene).map((plane) => {
+    const crop = new Float32Array(cw * ch);
+    for (let y = 0; y < ch; y++) crop.set(plane.subarray((y0 + y) * scene.width + x0, (y0 + y) * scene.width + x0 + cw), y * cw);
+    return resizePlane(crop, cw, ch, w, h);
+  });
+}
+
+// Small deterministic random numbers (same result every run).
+function rand(seed) {
+  let x = seed | 0 || 1;
+  return () => {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    return (x >>> 0) / 4294967296;
+  };
+}
+
+// Put the subject into a scene so it looks like it belongs there:
+// 1. clean the edges: remove the old background's colour that is mixed
+//    into hair and edge pixels,
+// 2. match colour and brightness a little toward the scene,
+// 3. "light wrap": the scene's light spills softly over the edges,
+// 4. soft contact shadow around and below the subject,
+// 5. the scene gets the same photo grain (noise) as the subject.
+export function placeOnScene(img, mask, scene) {
+  const { width: w, height: h } = img;
+  const n = w * h;
+  const a = alphaOf(img, mask);
+  const I = toPlanes(img);
+  const S = coverScene(scene, w, h);
+
+  // 1. Edge clean-up. B = old background, inside = subject colour just
+  //    inside the edge. An edge pixel is I = a*F + (1-a)*B.
+  const B = backgroundOnly(I, a, w, h, 0.02);
+  const solid = new Float32Array(n);
+  for (let i = 0; i < n; i++) solid[i] = a[i] > 0.9 ? 1 : 0;
+  const inside = fillFrom(I, solid, w, h, 0.01, 1e-4);
+
+  //    The AI mask is often a little too wide. Where an edge pixel's colour
+  //    is plainly the old background's, lower its alpha to match.
+  for (let i = 0; i < n; i++) {
+    if (a[i] <= 0.02 || a[i] >= 0.98) continue;
+    let dd = 0;
+    let dot = 0;
+    for (let c = 0; c < 3; c++) {
+      const dv = inside[c][i] - B[c][i];
+      dd += dv * dv;
+      dot += (I[c][i] - B[c][i]) * dv;
+    }
+    if (dd > 900) a[i] = Math.min(a[i], Math.max(0, dot / dd + 0.1));
+  }
+
+  //    Solve for F; where alpha is faint that guess is unreliable, so the
+  //    colour comes from the subject just inside the edge instead.
+  const F = I.map((plane, c) => {
+    const f = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      if (a[i] > 0.98) {
+        f[i] = plane[i];
+        continue;
+      }
+      const solved = Math.min(255, Math.max(0, B[c][i] + (plane[i] - B[c][i]) / Math.max(a[i], 0.25)));
+      const t = Math.min(1, Math.max(0, (a[i] - 0.3) / 0.6));
+      f[i] = inside[c][i] + (solved - inside[c][i]) * t * t * (3 - 2 * t);
+    }
+    return f;
+  });
+
+  // 2. Colour and brightness: move part of the way toward the scene.
+  const mean = (planes, weight) => {
+    const m = [0, 0, 0];
+    let sw = 0;
+    for (let i = 0; i < n; i += 7) {
+      const wi = weight ? weight[i] : 1;
+      sw += wi;
+      for (let c = 0; c < 3; c++) m[c] += planes[c][i] * wi;
+    }
+    return m.map((v) => v / Math.max(sw, 1e-6));
+  };
+  const lum = (m) => 0.299 * m[0] + 0.587 * m[1] + 0.114 * m[2];
+  const fm = mean(F, a);
+  const sm = mean(S);
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const gainL = clamp(Math.pow(lum(sm) / Math.max(lum(fm), 1), 0.25), 0.85, 1.2);
+  const gains = [0, 1, 2].map((c) => {
+    const tint = sm[c] / Math.max(lum(sm), 1) / (fm[c] / Math.max(lum(fm), 1) || 1);
+    return gainL * clamp(Math.pow(tint, 0.3), 0.92, 1.08);
+  });
+
+  // 3. Light wrap: blurred scene light on the subject's outer edge.
+  const aSoft = softBlur(a, w, h, 0.012);
+  const wrap = S.map((plane) => softBlur(plane, w, h, 0.012));
+
+  // 4. Contact shadow: a soft, slightly lowered copy of the mask.
+  const shift = Math.round(h * 0.012);
+  const lowered = new Float32Array(n);
+  lowered.set(a.subarray(0, n - shift * w), shift * w);
+  const shadow = softBlur(lowered, w, h, 0.025);
+
+  // 5. Grain: estimate the photo's noise from the subject.
+  const L = new Float32Array(n);
+  for (let i = 0; i < n; i++) L[i] = 0.299 * I[0][i] + 0.587 * I[1][i] + 0.114 * I[2][i];
+  const Lb = boxBlur(L, w, h, 1);
+  const diffs = [];
+  for (let i = 0; i < n; i += 13) if (a[i] > 0.95) diffs.push(Math.abs(L[i] - Lb[i]));
+  diffs.sort((x, y) => x - y);
+  const grain = Math.min(8, 1.5 * (diffs[diffs.length >> 1] || 0));
+  const random = rand(12345);
+
+  const out = makeImage(w, h);
+  const d = out.data;
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const ai = a[i];
+    const edge = ai * (1 - aSoft[i]); // inside the subject, near its edge
+    const dark = 1 - 0.35 * shadow[i] * (1 - ai);
+    const g = grain ? (random() + random() + random() - 1.5) * grain * 1.4 : 0;
+    for (let c = 0; c < 3; c++) {
+      let f = F[c][i] * gains[c];
+      f += 0.6 * edge * (wrap[c][i] - f);
+      const b = S[c][i] * dark + g;
+      d[j + c] = f * ai + b * (1 - ai);
+    }
+    d[j + 3] = 255;
+  }
+  return out;
 }
 
 // ---------- text ----------
