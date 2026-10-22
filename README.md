@@ -9,7 +9,8 @@ happens on the phone, including the AI. Works offline once installed.
   white)
 - Remove the background (AI on the phone), then choose transparent, a
   colour, a blurred background, or a new scene (beach, basketball court,
-  soccer stadium, scenery, or any photo of your own), fitted in smoothly
+  soccer stadium, scenery, or any photo of your own), fitted in smoothly;
+  move and resize the person, and optionally let the sun cast a shadow
 - Undo, Reset, before/after slider
 - Save to Photos through the share sheet
 

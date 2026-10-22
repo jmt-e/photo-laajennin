@@ -6,6 +6,9 @@
 // transport can send the same calls to the PC over Tailscale (phase 3)
 // without the app changing; see CLAUDE.md.
 
+// Shadow geometry is shared with the app's instant preview.
+export { shadowShear } from './ops.js';
+
 let worker = null;
 let nextId = 1;
 const pending = new Map();
@@ -66,7 +69,8 @@ export const engine = {
   cutout: (image, mask) => call('cutout', { image: plain(image), mask }),
 
   // background: { type: 'transparent' | 'color' | 'blur', color? } or
-  // { type: 'scene', scene, cut?, transform?: { scale, dx, dy } }
+  // { type: 'scene', scene, cut?, transform?: { scale, dx, dy },
+  //   light?: { angle, length, strength, ground } } (sun and cast shadow)
   composite: (image, mask, background) => call('composite', { image: plain(image), mask, background }),
 
   isModelCached: () => call('isModelCached'),

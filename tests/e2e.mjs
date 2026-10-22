@@ -146,6 +146,43 @@ try {
   await page.screenshot({ path: `${shots}/5-moved.png` });
   await page.click('#scene-reset');
   await fitted();
+
+  // Sun & shadow option: on, then turn the shadow to the right.
+  const checksum = () => page.$eval('#after', (c) => {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 97) sum += d[i];
+    return sum;
+  });
+  await page.click('[data-scene="beach"]');
+  await idle();
+  await fitted();
+  const noSun = await checksum();
+  await page.click('#sun-toggle');
+  await fitted();
+  assert.equal(await page.getAttribute('#sun-toggle', 'aria-pressed'), 'true');
+  assert.equal(await page.isVisible('#sun-length'), true, 'sun sliders shown');
+  const withSun = await checksum();
+  await page.screenshot({ path: `${shots}/5-sun.png` });
+  assert.notEqual(withSun, noSun, 'shadow and light change the picture');
+  await page.$eval('#sun-angle', (s) => {
+    s.value = '70';
+    s.dispatchEvent(new Event('input'));
+    s.dispatchEvent(new Event('change'));
+  });
+  await fitted();
+  assert.match(await page.textContent('#sun-dir-label'), /→|↘/);
+  await page.screenshot({ path: `${shots}/5-sun-right.png` });
+  await page.$eval('#scene-size', (s) => {
+    s.value = '55';
+    s.dispatchEvent(new Event('input'));
+    s.dispatchEvent(new Event('change'));
+  });
+  await fitted();
+  await page.screenshot({ path: `${shots}/5-sun-small.png` });
+  await page.click('#sun-toggle');
+  await fitted();
+  step('sun & shadow option, direction');
   await page.setInputFiles('#scene-file', photo);
   await idle();
   await fitted();

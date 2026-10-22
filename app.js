@@ -1,4 +1,4 @@
-import { engine } from './engine/engine.js';
+import { engine, shadowShear } from './engine/engine.js';
 
 const MAX_SIDE = 2048; // keeps Safari fast and within its memory limits
 const MAX_HISTORY = 10; // each step is ~12 MB at full size
@@ -38,6 +38,12 @@ const el = {
   scenePlace: $('scene-place'),
   sceneSize: $('scene-size'),
   sceneReset: $('scene-reset'),
+  sunToggle: $('sun-toggle'),
+  sunAngle: $('sun-angle'),
+  sunOffNote: $('sun-off-note'),
+  sunLengthRow: $('sun-length-row'),
+  sunLength: $('sun-length'),
+  sunDirLabel: $('sun-dir-label'),
   sceneFile: $('scene-file'),
   bgCustom: $('bg-custom'),
   saveSheet: $('save-sheet'),
@@ -439,6 +445,18 @@ async function previewBg() {
 
 const cuts = new WeakMap(); // image -> cut-out layer { image, anchor }
 const place = { base: null, cut: null, scene: null, sceneName: null, transform: { scale: 1, dx: 0, dy: 0 } };
+
+// Sun for each scene: where its light comes from (as the shadow direction,
+// see shadowShear: 0 = toward you), how long shadows are, and where the
+// ground starts (fraction of the scene's height; null = don't know).
+const SCENE_SUN = {
+  beach: { angle: 30, length: 0.8, strength: 0.55, ground: 0.72 },
+  'basketball-court': { angle: 0, length: 0.3, strength: 0.45, ground: 0.56 },
+  'soccer-stadium': { angle: -10, length: 1.4, strength: 0.5, ground: 0.5 },
+  scenery: { angle: -35, length: 0.7, strength: 0.55, ground: 0.78 },
+  own: { angle: 20, length: 0.7, strength: 0.5, ground: null },
+};
+const sun = { on: false, angle: 0, length: 0.7, strength: 0.5, ground: null };
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 3;
 
@@ -449,7 +467,8 @@ function canvasOf(img) {
 }
 
 // The scene cropped to cover the photo's frame (same crop as the engine's
-// coverScene, so the engine then uses it as is).
+// coverScene, so the engine then uses it as is). Also says where a line at
+// `fraction` of the scene's height ends up in the frame.
 function coverImage(img, w, h) {
   const scale = Math.max(w / img.width, h / img.height);
   const cw = Math.min(img.width, Math.round(w / scale));
@@ -462,7 +481,26 @@ function coverImage(img, w, h) {
   const ctx = out.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(canvasOf(img), x0, y0, cw, ch, 0, 0, w, h);
-  return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
+  const where = (fraction) => Math.min(1, Math.max(0, (fraction * img.height - y0) / ch));
+  return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data, where };
+}
+
+// The cut-out filled with black, for the instant shadow preview.
+function silhouetteOf(canvas) {
+  const c = document.createElement('canvas');
+  c.width = canvas.width;
+  c.height = canvas.height;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(canvas, 0, 0);
+  ctx.globalCompositeOperation = 'source-in';
+  ctx.fillStyle = '#00030a';
+  ctx.fillRect(0, 0, c.width, c.height);
+  return c;
+}
+
+function sunLight() {
+  if (!sun.on) return null;
+  return { angle: sun.angle, length: sun.length, strength: sun.strength, ground: sun.ground };
 }
 
 function placing() {
@@ -479,7 +517,26 @@ function drawPlacement() {
   ctx.drawImage(place.sceneCanvas, 0, 0);
   const { scale, dx, dy } = place.transform;
   const { x: ax, y: ay } = place.cut.anchor;
-  ctx.drawImage(place.subjectCanvas, ax * (1 - scale) + dx, ay * (1 - scale) + dy, w * scale, h * scale);
+  const x = ax * (1 - scale) + dx;
+  const y = ay * (1 - scale) + dy;
+  if (sun.on) {
+    // The cast shadow is the silhouette slanted onto the ground (an affine
+    // map, see shadowShear); the engine's full fit adds soft ends and light.
+    const { kx, ky } = shadowShear(sun);
+    const fy = ay + dy; // the feet
+    ctx.save();
+    if (sun.ground !== null) {
+      ctx.beginPath();
+      ctx.rect(0, sun.ground * h, w, h);
+      ctx.clip();
+    }
+    ctx.setTransform(1, 0, -kx, -ky, kx * fy, fy * (1 + ky));
+    ctx.filter = `blur(${Math.max(1, Math.round(h * 0.005))}px)`;
+    ctx.globalAlpha = sun.strength * 0.7;
+    ctx.drawImage(place.silhouetteCanvas, x, y, w * scale, h * scale);
+    ctx.restore();
+  }
+  ctx.drawImage(place.subjectCanvas, x, y, w * scale, h * scale);
   el.sceneSize.value = String(Math.round(scale * 100));
 }
 
@@ -492,9 +549,15 @@ async function previewScene() {
     place.base = base;
     place.cut = cuts.get(base);
     place.sceneName = bgChoice.scene;
-    place.scene = coverImage(img, base.width, base.height);
+    const covered = coverImage(img, base.width, base.height);
+    place.scene = { width: covered.width, height: covered.height, data: covered.data };
     place.subjectCanvas = canvasOf(place.cut.image);
+    place.silhouetteCanvas = silhouetteOf(place.subjectCanvas);
     place.sceneCanvas = canvasOf(place.scene);
+    // Each scene starts with its own sun (on/off stays as you chose).
+    const preset = SCENE_SUN[bgChoice.scene] || SCENE_SUN.own;
+    Object.assign(sun, preset, { ground: preset.ground === null ? null : covered.where(preset.ground) });
+    showSun();
     return true;
   });
   if (!ready || state.panel !== 'bg' || current() !== base) return;
@@ -508,7 +571,8 @@ async function previewScene() {
 // Full-quality fit for the current place; never more than one waiting.
 let fitJob = null;
 let fitAgain = false;
-const sameTransform = (a, b) => a.scale === b.scale && a.dx === b.dx && a.dy === b.dy;
+// What the picture depends on: if this changed meanwhile, a finished fit is stale.
+const fitKey = () => JSON.stringify([place.transform, sunLight(), place.sceneName]);
 
 function fitScene() {
   if (fitJob) {
@@ -518,12 +582,18 @@ function fitScene() {
   fitJob = (async () => {
     do {
       fitAgain = false;
-      const t = { ...place.transform };
-      const { base, sceneName } = place;
+      const key = fitKey();
+      const { base } = place;
       setStatus('Fitting in…');
       try {
-        const out = await engine.composite(base, masks.get(base), { type: 'scene', scene: place.scene, cut: place.cut, transform: t });
-        if (placing() && sameTransform(t, place.transform) && sceneName === place.sceneName) {
+        const out = await engine.composite(base, masks.get(base), {
+          type: 'scene',
+          scene: place.scene,
+          cut: place.cut,
+          transform: { ...place.transform },
+          light: sunLight(),
+        });
+        if (placing() && key === fitKey()) {
           state.preview = out;
           render();
           setStatus('Drag to move · pinch to resize');
@@ -617,6 +687,43 @@ el.sceneSize.addEventListener('input', () => {
   drawPlacement();
 });
 el.sceneSize.addEventListener('change', () => placing() && fitScene());
+
+// Sun and shadow (an option). Sliders move the shadow instantly; the
+// full fit follows when you let go.
+const ARROWS = ['↓', '↘', '→', '↗', '↑', '↖', '←', '↙'];
+
+function showSun() {
+  el.sunToggle.setAttribute('aria-pressed', String(sun.on));
+  el.sunAngle.hidden = !sun.on;
+  el.sunOffNote.hidden = sun.on;
+  el.sunLengthRow.hidden = !sun.on;
+  el.sunAngle.value = String(Math.round(sun.angle));
+  el.sunLength.value = String(Math.round(sun.length * 100));
+  el.sunDirLabel.textContent = `Shadow ${ARROWS[(((Math.round(sun.angle / 45) % 8) + 8) % 8)]}`;
+}
+
+function sunChanged(final) {
+  if (!placing()) return;
+  state.preview = null;
+  showSun();
+  drawPlacement();
+  if (final) fitScene();
+}
+
+el.sunToggle.addEventListener('click', () => {
+  sun.on = !sun.on;
+  sunChanged(true);
+});
+el.sunAngle.addEventListener('input', () => {
+  sun.angle = Number(el.sunAngle.value);
+  sunChanged(false);
+});
+el.sunLength.addEventListener('input', () => {
+  sun.length = Number(el.sunLength.value) / 100;
+  sunChanged(false);
+});
+el.sunAngle.addEventListener('change', () => sunChanged(true));
+el.sunLength.addEventListener('change', () => sunChanged(true));
 
 el.sceneReset.addEventListener('click', () => {
   if (!placing()) return;

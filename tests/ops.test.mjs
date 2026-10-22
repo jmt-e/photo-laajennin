@@ -243,3 +243,44 @@ test('coverScene fills the frame without stretching', () => {
   assert.ok(r[0] > 40 && r[49] < 160, 'only the middle columns are used');
   assert.ok(g[0] < 5 && g[99 * 50] > 190, 'full height kept');
 });
+
+test('placeOnScene with sun: shadow falls the chosen way, only on the ground', () => {
+  // A dark "person" standing on the ground in the middle of the frame.
+  const w = 240;
+  const h = 240;
+  const img = ops.makeImage(w, h);
+  const mask = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const inside = x >= 110 && x < 130 && y >= 60 && y < 140;
+      img.data.set(inside ? [60, 40, 30, 255] : [200, 200, 200, 255], (y * w + x) * 4);
+      mask[y * w + x] = inside ? 255 : 0;
+    }
+  }
+  const scene = ops.makeImage(w, h);
+  for (let i = 0; i < w * h; i++) scene.data.set([180, 180, 180, 255], i * 4);
+  const lum = (im, x, y) => im.data[(y * w + x) * 4 + 1];
+  const plain = ops.placeOnScene(img, mask, scene);
+
+  // Sun behind the person: shadow comes toward the viewer (down).
+  const toward = ops.placeOnScene(img, mask, scene, { light: { angle: 0, length: 1, ground: 0.5 } });
+  assert.ok(lum(toward, 120, 165) < lum(plain, 120, 165) - 25, 'shadow below the feet');
+  assert.ok(Math.abs(lum(toward, 120, 40) - lum(plain, 120, 40)) < 3, 'nothing above the person');
+
+  // Shadow to the right.
+  const right = ops.placeOnScene(img, mask, scene, { light: { angle: 90, length: 1, ground: 0.5 } });
+  assert.ok(lum(right, 150, 143) < lum(plain, 150, 143) - 25, 'shadow to the right');
+  assert.ok(Math.abs(lum(right, 65, 143) - lum(plain, 65, 143)) < 3, 'not to the left');
+
+  // Ground starts below the shadow: no shadow drawn on the "sky".
+  const sky = ops.placeOnScene(img, mask, scene, { light: { angle: 90, length: 1, ground: 0.9 } });
+  assert.ok(Math.abs(lum(sky, 150, 143) - lum(plain, 150, 143)) < 3, 'no shadow above the ground line');
+});
+
+test('shadowShear: direction and length', () => {
+  const t = ops.shadowShear({ angle: 0, length: 1 });
+  assert.ok(Math.abs(t.kx) < 1e-9 && t.ky > 0);
+  assert.ok(ops.shadowShear({ angle: 90, length: 1 }).kx > 0.99);
+  assert.ok(ops.shadowShear({ angle: -90, length: 1 }).kx < -0.99);
+  assert.ok(ops.shadowShear({ angle: 180, length: 1 }).ky < 0);
+});

@@ -428,6 +428,29 @@ input[type="range"] {
   font-size: 14px;
 }
 
+.size-row + .size-row {
+  margin-top: 6px;
+}
+
+.size-row .note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sun-toggle {
+  gap: 4px;
+}
+
+.sun-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sun-toggle[aria-pressed="true"] {
+  background: #f5b82e;
+  color: #1b1300;
+}
+
 .size-row button {
   min-height: 36px;
   padding: 6px 12px;

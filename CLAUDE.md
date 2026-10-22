@@ -163,6 +163,22 @@ on extreme blur later (see roadmap).
   the anchor, premultiplied resampling), colour and brightness nudged
   toward the scene, light wrap, soft contact shadow, and the photo's
   noise (measured on smooth areas) added to the scene as grain.
+- **Sun & shadow** (option, off by default; `light` in placeOnScene):
+  - Cast shadow: each subject pixel is thrown onto the ground from its own
+    feet (lowest point within ~12 % of the subject's height, so two people
+    at different distances each start at their own feet), along
+    `shadowShear({ angle, length })` (0° = toward the viewer, 90° = right,
+    180° = away; ground seen at a slant, side shadows never thinner than
+    0.3). Sharp at the feet, softer and fainter further away, slightly
+    blue, and only below the scene's ground line.
+  - On the person: sunny side up to 12 % brighter, front slightly darker
+    when the sun is behind them, plus a rim light in the scene's highlight
+    colour (its brightest 2 %).
+  - Per-scene defaults in app.js `SCENE_SUN` (angle, length, strength,
+    ground as a fraction of the scene height, mapped through the cover
+    crop). "Your photo" has no ground line.
+  - Preview: the app draws the silhouette with the same affine shear on a
+    canvas (instant while sliding); the engine's full fit follows.
 - Placing (app.js): drag with one finger, pinch with two, or the Size
   slider (resizes around the bottom centre), plus Reset. While moving, the
   cut-out is just drawn over the scene on a canvas (instant); when you let
@@ -208,7 +224,8 @@ Done: **Text tool** for blurry zoomed photos of text (colour or black &
 white, blur-size slider).
 
 Done: **Scenes**: replace the background with beach, basketball court,
-soccer stadium, scenery or your own photo, with edge/colour/light fitting.
+soccer stadium, scenery or your own photo, with edge/colour/light fitting,
+move/resize, and an optional sun with cast shadow.
 
 Next, on the phone:
 - Crop and rotate
@@ -217,7 +234,8 @@ Next, on the phone:
 - Noise removal
 - Pinch to zoom the result in the app (useful for reading text)
 - Text: crop to just the text first; maybe an AI model for extreme blur
-- Scenes: rotate/flip the person; match the scene's light direction
+- Scenes: rotate/flip the person; guess the sun direction and ground
+  line for "Your photo" automatically
 
 Phase 2: a Python program on the owner's Windows PC for heavy AI work:
 - rembg for better background removal
