@@ -103,7 +103,7 @@ test('refineMask follows the photo edge', () => {
   const size = 16;
   const pred = new Float32Array(size * size);
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) pred[y * size + x] = 1 / (1 + Math.exp(-(x - 7.5) * 1.2));
-  const mask = ops.refineMask(pred, size, img);
+  const mask = ops.refineMask(pred, size, size, img);
   assert.equal(mask.length, w * h);
   const row = 40 * w;
   assert.ok(mask[row + 10] < 20, 'background clear');

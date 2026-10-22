@@ -133,6 +133,11 @@ body {
 
 .frame.comparing { touch-action: none; }
 
+.frame.placing {
+  touch-action: none;
+  cursor: move;
+}
+
 .divider {
   position: absolute;
   top: 0;
@@ -406,6 +411,27 @@ input[type="range"] {
 
 .scenes [aria-pressed="true"] {
   border-color: var(--accent);
+}
+
+.scene-place .hint {
+  margin: 8px 0 2px;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.size-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.size-row button {
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 13px;
 }
 
 .swatches {

@@ -61,7 +61,12 @@ export const engine = {
   // (AI files are being fetched), then { phase: 'start' } and { phase: 'run' }.
   segment: (image, onProgress) => call('segment', { image: plain(image) }, onProgress),
 
-  // background: { type: 'transparent' | 'color' | 'blur', color? }
+  // The subject as its own layer with clean edges, plus its anchor (bottom
+  // centre). Pass it to composite as background.cut to save time.
+  cutout: (image, mask) => call('cutout', { image: plain(image), mask }),
+
+  // background: { type: 'transparent' | 'color' | 'blur', color? } or
+  // { type: 'scene', scene, cut?, transform?: { scale, dx, dy } }
   composite: (image, mask, background) => call('composite', { image: plain(image), mask, background }),
 
   isModelCached: () => call('isModelCached'),

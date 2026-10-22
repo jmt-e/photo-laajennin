@@ -113,17 +113,44 @@ try {
   const blue = await page.$eval('#after', (c) => Array.from(c.getContext('2d').getImageData(5, 5, 1, 1).data));
   assert.deepEqual(blue, [47, 111, 222, 255]);
   await page.screenshot({ path: `${shots}/4-colour.png` });
+  // Wait until the engine's full fit (after moving) has been drawn.
+  const fitted = async () => {
+    await page.waitForFunction(() => document.getElementById('status').textContent.startsWith('Drag to move'), null, { timeout: 60000 });
+    await page.$eval('#status', (s) => (s.textContent = ''));
+  };
   for (const scene of ['beach', 'basketball-court', 'soccer-stadium', 'scenery']) {
     if (scene === 'beach') await page.click('[data-bg="scene"]');
     else await page.click(`[data-scene="${scene}"]`);
     await idle();
+    await fitted();
     assert.equal(await page.getAttribute(`[data-scene="${scene}"]`, 'aria-pressed'), 'true');
+    assert.equal(await page.isVisible('#scene-place'), true, 'move/resize controls shown');
     await page.screenshot({ path: `${shots}/5-${scene}.png` });
   }
+  // Move the person: drag left and down, then shrink with the slider.
+  const side = () => page.$eval("#after", (c) => Array.from(c.getContext("2d").getImageData(c.width / 2, c.height / 3, 1, 1).data));
+  const sideBefore = await side();
+  const fb = await page.locator('#frame').boundingBox();
+  await page.mouse.move(fb.x + fb.width / 2, fb.y + fb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(fb.x + fb.width * 0.3, fb.y + fb.height * 0.6, { steps: 5 });
+  await page.mouse.up();
+  await fitted();
+  await page.$eval('#scene-size', (s) => {
+    s.value = '60';
+    s.dispatchEvent(new Event('input'));
+    s.dispatchEvent(new Event('change'));
+  });
+  await fitted();
+  assert.notDeepEqual(await side(), sideBefore, "moving the person changed the picture");
+  await page.screenshot({ path: `${shots}/5-moved.png` });
+  await page.click('#scene-reset');
+  await fitted();
   await page.setInputFiles('#scene-file', photo);
   await idle();
+  await fitted();
   assert.equal(await page.getAttribute('[data-scene="own"]', 'aria-pressed'), 'true');
-  step('scenes: beach, court, stadium, scenery, your own photo');
+  step('scenes: beach, court, stadium, scenery, your own photo; move and resize');
   await page.click('[data-bg="blur"]');
   await idle();
   await page.screenshot({ path: `${shots}/5-blur.png` });

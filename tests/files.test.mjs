@@ -24,6 +24,8 @@ test('every file is under 100 MB (GitHub limit)', () => {
 
 test('progress-bar byte sizes match the real files', () => {
   const src = read('engine/worker.js');
+  const modnet = Number(src.match(/modnet\.onnx'[^}]*bytes: (\d+)/)[1]);
+  assert.equal(modnet, statSync(join(root, 'models/modnet.onnx')).size);
   const model = Number(src.match(/u2netp\.onnx'[^}]*bytes: (\d+)/)[1]);
   const wasm = Number(src.match(/simd-threaded\.wasm'[^}]*bytes: (\d+)/)[1]);
   assert.equal(model, statSync(join(root, 'models/u2netp.onnx')).size);

@@ -25,8 +25,11 @@ stops the page from contacting any other server.
 
 ## Credits
 
-The built-in scene backgrounds are drawn by `tools/make_backgrounds.py`.
-
+- [MODNet](https://github.com/ZHKKKe/MODNet) people cut-out model
+  (Apache-2.0), ONNX file from [Xenova/modnet](https://huggingface.co/Xenova/modnet)
+- The scene backgrounds were generated with Stable Diffusion
+  ([Realistic Vision 5.1](https://huggingface.co/SG161222/Realistic_Vision_V5.1_noVAE),
+  CreativeML OpenRAIL-M) by `tools/generate_scenes.py`.
 - [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT)
 - [U²-Net](https://github.com/xuebinqin/U-2-Net) model `u2netp` (Apache-2.0),
   ONNX file from [rembg](https://github.com/danielgatis/rembg)

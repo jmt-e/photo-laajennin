@@ -241,15 +241,36 @@ export function modelInput(img, size) {
   return out;
 }
 
-// Turn the model's small output into a full-size mask whose edges follow
-// the photo (guided filter, He et al. 2010).
-export function refineMask(pred, size, img) {
+// Model input for MODNet (people cut-out): long side 512, both sides a
+// multiple of 32, values scaled to -1..1, planar [1, 3, h, w].
+export function modnetInput(img, longSide = 512) {
+  const scale = longSide / Math.max(img.width, img.height);
+  const w = Math.max(32, Math.round((img.width * scale) / 32) * 32);
+  const h = Math.max(32, Math.round((img.height * scale) / 32) * 32);
+  const planes = toPlanes(img);
+  const data = new Float32Array(3 * w * h);
+  for (let c = 0; c < 3; c++) {
+    const p = resizePlane(planes[c], img.width, img.height, w, h);
+    for (let i = 0; i < p.length; i++) data[c * w * h + i] = p[i] / 127.5 - 1;
+  }
+  return { data, width: w, height: h };
+}
+
+// Turn the model's small output (pw x ph) into a full-size mask whose
+// edges follow the photo (guided filter, He et al. 2010).
+// normalize: stretch the output to 0..1 first (U2-Net; MODNet already is).
+// low/high: output values that become fully clear / fully solid.
+export function refineMask(pred, pw, ph, img, { normalize = true, low = 0.1, high = 0.9, eps = 1e-3 } = {}) {
   const { width: w, height: h } = img;
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (const v of pred) {
-    if (v < lo) lo = v;
-    if (v > hi) hi = v;
+  let lo = 0;
+  let hi = 1;
+  if (normalize) {
+    lo = Infinity;
+    hi = -Infinity;
+    for (const v of pred) {
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
   }
   const norm = new Float32Array(pred.length);
   for (let i = 0; i < pred.length; i++) norm[i] = (pred[i] - lo) / (hi - lo || 1);
@@ -264,11 +285,10 @@ export function refineMask(pred, size, img) {
   const lw = Math.max(1, Math.round(w * s));
   const lh = Math.max(1, Math.round(h * s));
   const Il = s < 1 ? resizePlane(I, w, h, lw, lh) : I;
-  const p = resizePlane(norm, size, size, lw, lh);
+  const p = resizePlane(norm, pw, ph, lw, lh);
 
   // Window about two model pixels wide, so it spans the blurry upscaled edge.
-  const r = Math.max(2, Math.round((2 * Math.max(lw, lh)) / size));
-  const eps = 1e-3;
+  const r = Math.max(2, Math.round((2 * Math.max(lw, lh)) / Math.max(pw, ph)));
   const n = lw * lh;
   const II = new Float32Array(n);
   const Ip = new Float32Array(n);
@@ -298,7 +318,7 @@ export function refineMask(pred, size, img) {
   for (let i = 0; i < mask.length; i++) {
     const q = ma[i] * I[i] + mb[i];
     // Gentle contrast so the subject is solid and the background clean.
-    const t = Math.min(1, Math.max(0, (q - 0.1) / 0.8));
+    const t = Math.min(1, Math.max(0, (q - low) / (high - low)));
     mask[i] = Math.round(t * 255);
   }
   return mask;
@@ -345,7 +365,8 @@ function alphaOf(img, mask) {
 
 // Put the cut-out subject on a new background.
 // background: { type: 'transparent' } | { type: 'color', color: '#rrggbb' }
-//           | { type: 'blur' } | { type: 'scene', scene: image }
+//           | { type: 'blur' }
+//           | { type: 'scene', scene: image, transform?, cut? } (see placeOnScene)
 export function composite(img, mask, background) {
   const { width: w, height: h, data: d } = img;
   const out = new Uint8ClampedArray(d.length);
@@ -360,7 +381,7 @@ export function composite(img, mask, background) {
     }
     return makeImage(w, h, out);
   }
-  if (type === 'scene') return placeOnScene(img, mask, background.scene);
+  if (type === 'scene') return placeOnScene(img, mask, background.scene, background);
 
   let bg;
   if (type === 'color') {
@@ -410,31 +431,29 @@ function rand(seed) {
   };
 }
 
-// Put the subject into a scene so it looks like it belongs there:
-// 1. clean the edges: remove the old background's colour that is mixed
-//    into hair and edge pixels,
-// 2. match colour and brightness a little toward the scene,
-// 3. "light wrap": the scene's light spills softly over the edges,
-// 4. soft contact shadow around and below the subject,
-// 5. the scene gets the same photo grain (noise) as the subject.
-export function placeOnScene(img, mask, scene) {
+// The cut-out subject as its own layer: RGBA where the colour is the
+// subject's own colour even at soft edges (old background removed) and
+// alpha is the mask, corrected where the AI mask spills onto the old
+// background. Also returns the anchor (bottom centre of the subject) that
+// moving and resizing are measured from.
+export function cutout(img, mask) {
   const { width: w, height: h } = img;
   const n = w * h;
   const a = alphaOf(img, mask);
   const I = toPlanes(img);
-  const S = coverScene(scene, w, h);
 
-  // 1. Edge clean-up. B = old background, inside = subject colour just
-  //    inside the edge. An edge pixel is I = a*F + (1-a)*B.
+  // B = old background, inside = subject colour just inside the edge.
+  // An edge pixel is I = a*F + (1-a)*B.
   const B = backgroundOnly(I, a, w, h, 0.02);
   const solid = new Float32Array(n);
   for (let i = 0; i < n; i++) solid[i] = a[i] > 0.9 ? 1 : 0;
   const inside = fillFrom(I, solid, w, h, 0.01, 1e-4);
 
-  //    The AI mask is often a little too wide. Where an edge pixel's colour
-  //    is plainly the old background's, lower its alpha to match.
+  // The AI mask is often a little too wide. Where an edge pixel's colour is
+  // plainly the old background's, lower its alpha to match.
+  // Only real edge pixels: inside the body, patterned clothes would fool it.
   for (let i = 0; i < n; i++) {
-    if (a[i] <= 0.02 || a[i] >= 0.98) continue;
+    if (a[i] <= 0.02 || a[i] >= 0.85) continue;
     let dd = 0;
     let dot = 0;
     for (let c = 0; c < 3; c++) {
@@ -445,23 +464,93 @@ export function placeOnScene(img, mask, scene) {
     if (dd > 900) a[i] = Math.min(a[i], Math.max(0, dot / dd + 0.1));
   }
 
-  //    Solve for F; where alpha is faint that guess is unreliable, so the
-  //    colour comes from the subject just inside the edge instead.
-  const F = I.map((plane, c) => {
-    const f = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
+  // Solve for F; where alpha is faint that guess is unreliable, so the
+  // colour comes from the subject just inside the edge instead.
+  const layer = makeImage(w, h);
+  const d = layer.data;
+  for (let c = 0; c < 3; c++) {
+    for (let i = 0, j = c; i < n; i++, j += 4) {
       if (a[i] > 0.98) {
-        f[i] = plane[i];
+        d[j] = I[c][i];
         continue;
       }
-      const solved = Math.min(255, Math.max(0, B[c][i] + (plane[i] - B[c][i]) / Math.max(a[i], 0.25)));
+      const solved = Math.min(255, Math.max(0, B[c][i] + (I[c][i] - B[c][i]) / Math.max(a[i], 0.25)));
       const t = Math.min(1, Math.max(0, (a[i] - 0.3) / 0.6));
-      f[i] = inside[c][i] + (solved - inside[c][i]) * t * t * (3 - 2 * t);
+      d[j] = inside[c][i] + (solved - inside[c][i]) * t * t * (3 - 2 * t);
     }
-    return f;
-  });
+  }
+  let sx = 0;
+  let sw = 0;
+  let bottom = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const v = a[y * w + x];
+      d[(y * w + x) * 4 + 3] = v * 255;
+      sx += x * v;
+      sw += v;
+      if (v > 0.5) bottom = y;
+    }
+  }
+  return { image: layer, anchor: { x: sw ? sx / sw : w / 2, y: sw ? bottom : h } };
+}
 
-  // 2. Colour and brightness: move part of the way toward the scene.
+// Where a subject pixel lands after moving/resizing: scaled by `scale`
+// around the anchor, then shifted by (dx, dy). All in image pixels.
+// Returns the layer resampled into the output frame (same size).
+function warpLayer(layer, anchor, { scale = 1, dx = 0, dy = 0 } = {}) {
+  const { width: w, height: h } = layer;
+  const n = w * h;
+  let planes = toPlanes(layer);
+  const alpha = new Float32Array(n);
+  for (let i = 0; i < n; i++) alpha[i] = layer.data[i * 4 + 3] / 255;
+  // Premultiply so edges don't pick up dark fringes when resampled.
+  for (const p of planes) for (let i = 0; i < n; i++) p[i] *= alpha[i];
+  planes.push(alpha);
+  if (scale === 1 && dx === 0 && dy === 0) return planes;
+  if (scale < 0.7) planes = planes.map((p) => boxBlur(p, w, h, Math.max(1, Math.round(0.5 / scale - 0.5))));
+  const out = planes.map(() => new Float32Array(n));
+  for (let y = 0; y < h; y++) {
+    const syf = (y - dy - anchor.y) / scale + anchor.y;
+    if (syf < 0 || syf > h - 1) continue;
+    const y0 = Math.floor(syf);
+    const y1 = Math.min(h - 1, y0 + 1);
+    const ty = syf - y0;
+    for (let x = 0; x < w; x++) {
+      const sxf = (x - dx - anchor.x) / scale + anchor.x;
+      if (sxf < 0 || sxf > w - 1) continue;
+      const x0 = Math.floor(sxf);
+      const x1 = Math.min(w - 1, x0 + 1);
+      const tx = sxf - x0;
+      const i = y * w + x;
+      for (let k = 0; k < planes.length; k++) {
+        const p = planes[k];
+        const top = p[y0 * w + x0] + (p[y0 * w + x1] - p[y0 * w + x0]) * tx;
+        const bot = p[y1 * w + x0] + (p[y1 * w + x1] - p[y1 * w + x0]) * tx;
+        out[k][i] = top + (bot - top) * ty;
+      }
+    }
+  }
+  return out;
+}
+
+// Put the subject into a scene so it looks like it belongs there:
+// 1. cut-out with clean edges (see cutout; pass one in to save time),
+// 2. moved/resized as asked (transform: { scale, dx, dy }),
+// 3. colour and brightness matched a little toward the scene,
+// 4. "light wrap": the scene's light spills softly over the edges,
+// 5. soft contact shadow around and below the subject,
+// 6. the scene gets the same photo grain (noise) as the subject.
+export function placeOnScene(img, mask, scene, { cut, transform } = {}) {
+  const { width: w, height: h } = img;
+  const n = w * h;
+  const S = coverScene(scene, w, h);
+  const { image: layer, anchor } = cut || cutout(img, mask);
+  const warped = warpLayer(layer, anchor, transform);
+  const a = warped[3];
+  // Back from premultiplied colour.
+  const F = warped.slice(0, 3).map((p) => p.map((v, i) => (a[i] > 1e-3 ? v / a[i] : 0)));
+
+  // 3. Colour and brightness: move part of the way toward the scene.
   const mean = (planes, weight) => {
     const m = [0, 0, 0];
     let sw = 0;
@@ -482,24 +571,30 @@ export function placeOnScene(img, mask, scene) {
     return gainL * clamp(Math.pow(tint, 0.3), 0.92, 1.08);
   });
 
-  // 3. Light wrap: blurred scene light on the subject's outer edge.
+  // 4. Light wrap: blurred scene light on the subject's outer edge.
   const aSoft = softBlur(a, w, h, 0.012);
   const wrap = S.map((plane) => softBlur(plane, w, h, 0.012));
 
-  // 4. Contact shadow: a soft, slightly lowered copy of the mask.
+  // 5. Contact shadow: a soft, slightly lowered copy of the subject.
   const shift = Math.round(h * 0.012);
   const lowered = new Float32Array(n);
   lowered.set(a.subarray(0, n - shift * w), shift * w);
   const shadow = softBlur(lowered, w, h, 0.025);
 
-  // 5. Grain: estimate the photo's noise from the subject.
-  const L = new Float32Array(n);
-  for (let i = 0; i < n; i++) L[i] = 0.299 * I[0][i] + 0.587 * I[1][i] + 0.114 * I[2][i];
+  // 6. Grain: the photo's sensor noise, measured on both the old
+  //    background and the subject; the smaller one is the noise (the
+  //    other also contains texture such as skin or foliage).
+  const L = luminance(img);
   const Lb = boxBlur(L, w, h, 1);
-  const diffs = [];
-  for (let i = 0; i < n; i += 13) if (a[i] > 0.95) diffs.push(Math.abs(L[i] - Lb[i]));
-  diffs.sort((x, y) => x - y);
-  const grain = Math.min(8, 1.5 * (diffs[diffs.length >> 1] || 0));
+  const original = alphaOf(img, mask);
+  const median = (keep) => {
+    const v = [];
+    for (let i = 0; i < n; i += 13) if (keep(original[i])) v.push(Math.abs(L[i] - Lb[i]));
+    v.sort((x, y) => x - y);
+    return v.length > 50 ? v[v.length >> 1] : Infinity;
+  };
+  const noise = Math.min(median((v) => v < 0.05), median((v) => v > 0.95));
+  const grain = Number.isFinite(noise) ? Math.min(5, 1.25 * noise) : 0;
   const random = rand(12345);
 
   const out = makeImage(w, h);

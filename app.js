@@ -35,6 +35,9 @@ const el = {
   panelBg: $('panel-bg'),
   bgColors: $('bg-colors'),
   bgScenes: $('bg-scenes'),
+  scenePlace: $('scene-place'),
+  sceneSize: $('scene-size'),
+  sceneReset: $('scene-reset'),
   sceneFile: $('scene-file'),
   bgCustom: $('bg-custom'),
   saveSheet: $('save-sheet'),
@@ -279,6 +282,7 @@ function closePanel() {
   state.panel = null;
   state.preview = null;
   for (const panel of Object.values(panels)) panel.hidden = true;
+  updatePlacing();
   render();
 }
 
@@ -395,6 +399,7 @@ function showBgChoice() {
     b.setAttribute('aria-pressed', String(bgChoice.type === 'color' && b.dataset.color === bgChoice.color));
   }
   el.bgScenes.hidden = bgChoice.type !== 'scene';
+  updatePlacing();
   for (const b of el.bgScenes.querySelectorAll('[data-scene]')) {
     b.setAttribute('aria-pressed', String(bgChoice.type === 'scene' && b.dataset.scene === bgChoice.scene));
   }
@@ -419,16 +424,207 @@ async function previewBg() {
   const base = current();
   const mask = masks.get(base);
   if (!mask) return;
-  const choice = bgChoice;
-  const out = await run(choice.type === 'scene' ? 'Fitting you into the scene…' : 'Changing background…', async () => {
-    const background = choice.type === 'scene' ? { type: 'scene', scene: await sceneImage(choice.scene) } : choice;
-    return engine.composite(base, mask, background);
-  });
+  if (bgChoice.type === 'scene') return previewScene();
+  const out = await run('Changing background…', () => engine.composite(base, mask, bgChoice));
   if (out && state.panel === 'bg' && current() === base) {
     state.preview = out;
     render();
   }
 }
+
+// ---------- scenes: place the person ----------
+// While you drag or pinch, the cut-out is simply drawn over the scene
+// (instant). When you let go, the engine does the full fit (edges, colour,
+// light, shadow, grain) and that replaces the quick preview.
+
+const cuts = new WeakMap(); // image -> cut-out layer { image, anchor }
+const place = { base: null, cut: null, scene: null, sceneName: null, transform: { scale: 1, dx: 0, dy: 0 } };
+const MIN_SCALE = 0.2;
+const MAX_SCALE = 3;
+
+function canvasOf(img) {
+  const c = document.createElement('canvas');
+  paint(c, img);
+  return c;
+}
+
+// The scene cropped to cover the photo's frame (same crop as the engine's
+// coverScene, so the engine then uses it as is).
+function coverImage(img, w, h) {
+  const scale = Math.max(w / img.width, h / img.height);
+  const cw = Math.min(img.width, Math.round(w / scale));
+  const ch = Math.min(img.height, Math.round(h / scale));
+  const x0 = Math.floor((img.width - cw) / 2);
+  const y0 = Math.floor((img.height - ch) * 0.6);
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(canvasOf(img), x0, y0, cw, ch, 0, 0, w, h);
+  return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
+}
+
+function placing() {
+  return state.panel === 'bg' && bgChoice.type === 'scene' && place.cut !== null && place.base === current();
+}
+
+function drawPlacement() {
+  const { width: w, height: h } = place.base;
+  if (el.after.width !== w || el.after.height !== h) {
+    el.after.width = w;
+    el.after.height = h;
+  }
+  const ctx = el.after.getContext('2d');
+  ctx.drawImage(place.sceneCanvas, 0, 0);
+  const { scale, dx, dy } = place.transform;
+  const { x: ax, y: ay } = place.cut.anchor;
+  ctx.drawImage(place.subjectCanvas, ax * (1 - scale) + dx, ay * (1 - scale) + dy, w * scale, h * scale);
+  el.sceneSize.value = String(Math.round(scale * 100));
+}
+
+async function previewScene() {
+  const base = current();
+  const ready = await run('Cutting out…', async () => {
+    if (!cuts.has(base)) cuts.set(base, await engine.cutout(base, masks.get(base)));
+    const img = await sceneImage(bgChoice.scene);
+    if (place.base !== base) place.transform = { scale: 1, dx: 0, dy: 0 };
+    place.base = base;
+    place.cut = cuts.get(base);
+    place.sceneName = bgChoice.scene;
+    place.scene = coverImage(img, base.width, base.height);
+    place.subjectCanvas = canvasOf(place.cut.image);
+    place.sceneCanvas = canvasOf(place.scene);
+    return true;
+  });
+  if (!ready || state.panel !== 'bg' || current() !== base) return;
+  state.preview = null;
+  layout();
+  drawPlacement();
+  updatePlacing();
+  fitScene();
+}
+
+// Full-quality fit for the current place; never more than one waiting.
+let fitJob = null;
+let fitAgain = false;
+const sameTransform = (a, b) => a.scale === b.scale && a.dx === b.dx && a.dy === b.dy;
+
+function fitScene() {
+  if (fitJob) {
+    fitAgain = true;
+    return;
+  }
+  fitJob = (async () => {
+    do {
+      fitAgain = false;
+      const t = { ...place.transform };
+      const { base, sceneName } = place;
+      setStatus('Fitting in…');
+      try {
+        const out = await engine.composite(base, masks.get(base), { type: 'scene', scene: place.scene, cut: place.cut, transform: t });
+        if (placing() && sameTransform(t, place.transform) && sceneName === place.sceneName) {
+          state.preview = out;
+          render();
+          setStatus('Drag to move · pinch to resize');
+        }
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    } while (fitAgain && placing());
+  })().finally(() => {
+    fitJob = null;
+  });
+}
+
+previews.bg = {
+  // Apply: make sure the full fit of the final place is done.
+  async settled() {
+    if (!placing()) return;
+    if (!state.preview && !fitJob) fitScene();
+    while (fitJob) await fitJob;
+  },
+};
+
+function updatePlacing() {
+  const on = placing();
+  el.frame.classList.toggle('placing', on);
+  el.scenePlace.hidden = !on;
+}
+
+// Drag with one finger, pinch with two. Positions are in image pixels.
+const fingers = new Map();
+let gesture = null;
+
+function startGesture() {
+  const pts = [...fingers.values()];
+  gesture = { transform: { ...place.transform }, pts: pts.map((p) => ({ ...p })) };
+}
+
+function toImage(p) {
+  const r = el.frame.getBoundingClientRect();
+  const k = place.base.width / r.width;
+  return { x: (p.x - r.left) * k, y: (p.y - r.top) * k };
+}
+
+el.frame.addEventListener('pointerdown', (e) => {
+  if (!placing() || state.comparing || state.busy) return;
+  el.frame.setPointerCapture(e.pointerId);
+  fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  state.preview = null;
+  startGesture();
+});
+
+el.frame.addEventListener('pointermove', (e) => {
+  if (!fingers.has(e.pointerId) || !gesture) return;
+  fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const now = [...fingers.values()].map(toImage);
+  const then = gesture.pts.map(toImage);
+  const t0 = gesture.transform;
+  const { x: ax, y: ay } = place.cut.anchor;
+  if (now.length === 1) {
+    place.transform = { ...t0, dx: t0.dx + now[0].x - then[0].x, dy: t0.dy + now[0].y - then[0].y };
+  } else {
+    const mid = (p) => ({ x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 });
+    const dist = (p) => Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, (t0.scale * dist(now)) / Math.max(dist(then), 1)));
+    // Keep the point that was under your fingers under your fingers.
+    const c0 = mid(then);
+    const c1 = mid(now);
+    const sx = (c0.x - ax - t0.dx) / t0.scale + ax;
+    const sy = (c0.y - ay - t0.dy) / t0.scale + ay;
+    place.transform = { scale, dx: c1.x - ax - (sx - ax) * scale, dy: c1.y - ay - (sy - ay) * scale };
+  }
+  drawPlacement();
+});
+
+function endFinger(e) {
+  if (!fingers.delete(e.pointerId)) return;
+  if (fingers.size) startGesture();
+  else {
+    gesture = null;
+    fitScene();
+  }
+}
+el.frame.addEventListener('pointerup', endFinger);
+el.frame.addEventListener('pointercancel', endFinger);
+
+// The size slider (one-handed alternative to pinching).
+el.sceneSize.addEventListener('input', () => {
+  if (!placing()) return;
+  state.preview = null;
+  place.transform = { ...place.transform, scale: Number(el.sceneSize.value) / 100 };
+  drawPlacement();
+});
+el.sceneSize.addEventListener('change', () => placing() && fitScene());
+
+el.sceneReset.addEventListener('click', () => {
+  if (!placing()) return;
+  state.preview = null;
+  place.transform = { scale: 1, dx: 0, dy: 0 };
+  drawPlacement();
+  fitScene();
+});
 
 el.background.addEventListener('click', async () => {
   const base = current();
