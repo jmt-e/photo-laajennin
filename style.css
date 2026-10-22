@@ -172,6 +172,26 @@ body {
 .divider span::before { left: 2px; border-right-color: #555; }
 .divider span::after { right: 2px; border-left-color: #555; }
 
+.sun-handle {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  background: rgba(245, 184, 46, 0.9);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+  touch-action: none;
+  cursor: grab;
+  z-index: 2;
+}
+
+.sun-handle::after {
+  content: "";
+  position: absolute;
+  inset: -14px; /* a bigger area to grab with a thumb */
+}
+
 .tag {
   position: absolute;
   top: 8px;

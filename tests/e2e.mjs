@@ -115,7 +115,7 @@ try {
   await page.screenshot({ path: `${shots}/4-colour.png` });
   // Wait until the engine's full fit (after moving) has been drawn.
   const fitted = async () => {
-    await page.waitForFunction(() => document.getElementById('status').textContent.startsWith('Drag to move'), null, { timeout: 60000 });
+    await page.waitForFunction(() => document.getElementById('status').textContent.startsWith('Drag'), null, { timeout: 60000 });
     await page.$eval('#status', (s) => (s.textContent = ''));
   };
   for (const scene of ['beach', 'basketball-court', 'soccer-stadium', 'scenery']) {
@@ -128,7 +128,12 @@ try {
     await page.screenshot({ path: `${shots}/5-${scene}.png` });
   }
   // Move the person: drag left and down, then shrink with the slider.
-  const side = () => page.$eval("#after", (c) => Array.from(c.getContext("2d").getImageData(c.width / 2, c.height / 3, 1, 1).data));
+  const side = () => page.$eval('#after', (c) => {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 97) sum += d[i];
+    return sum;
+  });
   const sideBefore = await side();
   const fb = await page.locator('#frame').boundingBox();
   await page.mouse.move(fb.x + fb.width / 2, fb.y + fb.height / 2);
@@ -158,31 +163,58 @@ try {
   await idle();
   await fitted();
   const noSun = await checksum();
-  await page.click('#sun-toggle');
-  await fitted();
-  assert.equal(await page.getAttribute('#sun-toggle', 'aria-pressed'), 'true');
-  assert.equal(await page.isVisible('#sun-length'), true, 'sun sliders shown');
-  const withSun = await checksum();
-  await page.screenshot({ path: `${shots}/5-sun.png` });
-  assert.notEqual(withSun, noSun, 'shadow and light change the picture');
-  await page.$eval('#sun-angle', (s) => {
-    s.value = '70';
-    s.dispatchEvent(new Event('input'));
-    s.dispatchEvent(new Event('change'));
-  });
-  await fitted();
-  assert.match(await page.textContent('#sun-dir-label'), /→|↘/);
-  await page.screenshot({ path: `${shots}/5-sun-right.png` });
+  // Make the person smaller and lift them, so their feet stand in the scene.
   await page.$eval('#scene-size', (s) => {
     s.value = '55';
     s.dispatchEvent(new Event('input'));
     s.dispatchEvent(new Event('change'));
   });
   await fitted();
-  await page.screenshot({ path: `${shots}/5-sun-small.png` });
+  await page.mouse.move(fb.x + fb.width / 2, fb.y + fb.height * 0.8);
+  await page.mouse.down();
+  await page.mouse.move(fb.x + fb.width / 2, fb.y + fb.height * 0.6, { steps: 4 });
+  await page.mouse.up();
+  await fitted();
   await page.click('#sun-toggle');
   await fitted();
-  step('sun & shadow option, direction');
+  assert.equal(await page.getAttribute('#sun-toggle', 'aria-pressed'), 'true');
+  assert.equal(await page.isVisible('#sun-handle'), true, 'shadow-end dot shown');
+  assert.equal(await page.isVisible('#sun-strength'), true, 'darkness slider shown');
+  const withSun = await checksum();
+  await page.screenshot({ path: `${shots}/5-sun.png` });
+  assert.notEqual(withSun, noSun, 'shadow and light change the picture');
+  // Aim the shadow: drag the dot to the left.
+  const hb = await page.locator('#sun-handle').boundingBox();
+  const aimStart = Date.now();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hb.x + hb.width / 2 - 90, hb.y + hb.height / 2 - 20, { steps: 8 });
+  await page.mouse.up();
+  await fitted();
+  const aimMs = Date.now() - aimStart;
+  const hb2 = await page.locator('#sun-handle').boundingBox();
+  assert.ok(hb2.x < hb.x - 60, 'dot followed the finger');
+  assert.notEqual(await checksum(), withSun, 'shadow moved');
+  await page.screenshot({ path: `${shots}/5-sun-right.png` });
+  // Moving the person with the sun on is instant (no engine work).
+  const moveStart = Date.now();
+  await page.mouse.move(fb.x + fb.width / 2, fb.y + fb.height * 0.5);
+  await page.mouse.down();
+  await page.mouse.move(fb.x + fb.width * 0.45, fb.y + fb.height * 0.45, { steps: 5 });
+  await page.mouse.up();
+  const moveMs = Date.now() - moveStart;
+  console.log(`  aim shadow ${aimMs} ms, move person ${moveMs} ms`);
+  await page.$eval('#sun-strength', (s) => {
+    s.value = '90';
+    s.dispatchEvent(new Event('input'));
+    s.dispatchEvent(new Event('change'));
+  });
+  await fitted();
+  await page.screenshot({ path: `${shots}/5-sun-dark.png` });
+  await page.click('#sun-toggle');
+  await fitted();
+  assert.equal(await page.isVisible('#sun-handle'), false, 'dot hidden when sun is off');
+  step('sun & shadow: on, aim by dragging the dot, darkness, off');
   await page.setInputFiles('#scene-file', photo);
   await idle();
   await fitted();

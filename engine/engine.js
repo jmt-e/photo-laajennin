@@ -68,9 +68,18 @@ export const engine = {
   // centre). Pass it to composite as background.cut to save time.
   cutout: (image, mask) => call('cutout', { image: plain(image), mask }),
 
+  // Scene pictures as layers the app stacks and redraws instantly (see
+  // "scenes as layers" in ops.js):
+  // { scene, subject } for a scene (scene must already cover the photo frame)
+  sceneFit: (image, mask, cut, scene) => call('sceneFit', { image: plain(image), mask, cut, scene }),
+  // { pad, width, height, contact, cast } shadow layers; light = null for none
+  shadows: (cut, light) => call('shadows', { cut, light }),
+  // the person lit by the sun
+  relight: (subject, scene, light) => call('relight', { subject, scene, light }),
+
   // background: { type: 'transparent' | 'color' | 'blur', color? } or
   // { type: 'scene', scene, cut?, transform?: { scale, dx, dy },
-  //   light?: { angle, length, strength, ground } } (sun and cast shadow)
+  //   light?: { kx, ky, strength, ground } } (sun and cast shadow)
   composite: (image, mask, background) => call('composite', { image: plain(image), mask, background }),
 
   isModelCached: () => call('isModelCached'),

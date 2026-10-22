@@ -494,70 +494,78 @@ export function cutout(img, mask) {
   return { image: layer, anchor: { x: sw ? sx / sw : w / 2, y: sw ? bottom : h } };
 }
 
-// Where a subject pixel lands after moving/resizing: scaled by `scale`
-// around the anchor, then shifted by (dx, dy). All in image pixels.
-// Returns the layer resampled into the output frame (same size).
-function warpLayer(layer, anchor, { scale = 1, dx = 0, dy = 0 } = {}) {
-  const { width: w, height: h } = layer;
-  const n = w * h;
-  let planes = toPlanes(layer);
-  const alpha = new Float32Array(n);
-  for (let i = 0; i < n; i++) alpha[i] = layer.data[i * 4 + 3] / 255;
-  // Premultiply so edges don't pick up dark fringes when resampled.
-  for (const p of planes) for (let i = 0; i < n; i++) p[i] *= alpha[i];
-  planes.push(alpha);
-  if (scale === 1 && dx === 0 && dy === 0) return planes;
-  if (scale < 0.7) planes = planes.map((p) => boxBlur(p, w, h, Math.max(1, Math.round(0.5 / scale - 0.5))));
-  const out = planes.map(() => new Float32Array(n));
-  for (let y = 0; y < h; y++) {
-    const syf = (y - dy - anchor.y) / scale + anchor.y;
-    if (syf < 0 || syf > h - 1) continue;
-    const y0 = Math.floor(syf);
-    const y1 = Math.min(h - 1, y0 + 1);
-    const ty = syf - y0;
-    for (let x = 0; x < w; x++) {
-      const sxf = (x - dx - anchor.x) / scale + anchor.x;
-      if (sxf < 0 || sxf > w - 1) continue;
-      const x0 = Math.floor(sxf);
-      const x1 = Math.min(w - 1, x0 + 1);
-      const tx = sxf - x0;
-      const i = y * w + x;
-      for (let k = 0; k < planes.length; k++) {
-        const p = planes[k];
-        const top = p[y0 * w + x0] + (p[y0 * w + x1] - p[y0 * w + x0]) * tx;
-        const bot = p[y1 * w + x0] + (p[y1 * w + x1] - p[y1 * w + x0]) * tx;
-        out[k][i] = top + (bot - top) * ty;
-      }
-    }
+// ---------- scenes as layers ----------
+// A scene picture is a stack of layers that the app can redraw instantly
+// while you move the person or the shadow:
+//   1. the scene (with the photo's grain)          sceneFit
+//   2. shadows: contact (under the feet) + cast    shadowLayers
+//   3. the person, colour-matched (and sun-lit)     sceneFit / relight
+// Shadow layers are drawn with "multiply". Every layer except the scene is
+// in the cut-out's coordinates, so moving/resizing the person moves its
+// shadow with it (a ground shadow scales and shifts exactly like the
+// person does). composeScene stacks them the same way the app's canvas
+// does, for the engine API and tests.
+
+// Shadow direction. light: { kx, ky } = where the shadow of the top of the
+// person lands, measured from the feet in person-heights (kx right, ky
+// down = toward you). Or { angle, length } (0° = toward you, 90° = right).
+// Side shadows are never thinner than 15 % of their length, like ground
+// seen at a slant.
+export function shadowShear(light = {}) {
+  let { kx, ky } = light;
+  if (kx === undefined) {
+    const t = ((light.angle ?? 0) * Math.PI) / 180;
+    const length = light.length ?? 0.7;
+    kx = length * Math.sin(t);
+    ky = length * 0.5 * Math.cos(t);
   }
-  return out;
+  const len = Math.hypot(kx, ky);
+  const minY = 0.15 * len;
+  if (Math.abs(ky) < minY) ky = ky < 0 ? -minY : minY;
+  return { kx, ky };
 }
 
-// Sun shadow geometry. A point of the subject at height hgt above the
-// anchor (its feet) lands on the ground at
-//   x + hgt * kx,  anchorY + hgt * ky
-// angle: 0 = shadow comes toward you (sun behind the person), 90 = to the
-// right, -90 = to the left, 180 = away from you. length: 1 = as long as
-// the person is tall (ground is seen at a slant, so it looks shorter).
-export function shadowShear({ angle = 0, length = 0.7 } = {}) {
-  const t = (angle * Math.PI) / 180;
-  const c = Math.cos(t);
-  return { kx: length * Math.sin(t), ky: length * 0.5 * (c < 0 ? -1 : 1) * Math.max(Math.abs(c), 0.3) };
+const SHADE = [38, 46, 70]; // shadow colour for "multiply": a little blue, like shade under a blue sky
+
+function shadeImage(values, w, h) {
+  const img = makeImage(w, h);
+  for (let i = 0, j = 0; i < values.length; i++, j += 4) {
+    img.data[j] = SHADE[0];
+    img.data[j + 1] = SHADE[1];
+    img.data[j + 2] = SHADE[2];
+    img.data[j + 3] = Math.min(1, values[i]) * 255;
+  }
+  return img;
 }
 
-// The cast shadow (0..1) of a subject alpha. Each part of the subject
-// stands on the ground under its own lowest point nearby (so two people at
-// different distances each get a shadow from their own feet). Sharp at
-// the feet, softer and fainter further away; only on the ground (below
-// `ground`, a fraction of the height) when that is known.
-function castShadow(a, w, h, light) {
-  const f = Math.min(1, 512 / Math.max(w, h));
-  const lw = Math.max(1, Math.round(w * f));
-  const lh = Math.max(1, Math.round(h * f));
-  const al = f < 1 ? resizePlane(a, w, h, lw, lh) : a;
-  const { kx, ky } = shadowShear(light);
+// Shadow layers for a cut-out (see cutout). They cover the photo frame
+// plus half a frame on every side (pad), so a shadow can fall outside the
+// original photo when the person is made smaller. Low resolution: shadows
+// are soft. light = null: only the contact shadow.
+// Returns { pad: {x, y}, width, height, contact, cast } where width/height
+// are the padded size in photo pixels and contact/cast are RGBA images.
+export function shadowLayers(cut, light, { maxSide = 640 } = {}) {
+  const { image: layer } = cut;
+  const w = layer.width;
+  const h = layer.height;
+  const pad = { x: Math.round(w / 2), y: Math.round(h / 2) };
+  const W = w + 2 * pad.x;
+  const H = h + 2 * pad.y;
+  const f = Math.min(1, maxSide / Math.max(W, H));
+  const lw = Math.max(1, Math.round(W * f));
+  const lh = Math.max(1, Math.round(H * f));
+  // The cut-out's alpha, small, inside the padded frame.
+  const alpha = new Float32Array(w * h);
+  for (let i = 0; i < alpha.length; i++) alpha[i] = layer.data[i * 4 + 3] / 255;
+  const iw = Math.max(1, Math.round(w * f));
+  const ih = Math.max(1, Math.round(h * f));
+  const small = resizePlane(alpha, w, h, iw, ih);
+  const ox = Math.round(pad.x * f);
+  const oy = Math.round(pad.y * f);
+  const al = new Float32Array(lw * lh);
+  for (let y = 0; y < ih && y + oy < lh; y++) al.set(small.subarray(y * iw, y * iw + Math.min(iw, lw - ox)), (y + oy) * lw + ox);
 
-  // Lowest solid pixel per column, and the subject's height.
+  // Lowest solid point per column, and the person's height.
   const bottom = new Float32Array(lw).fill(-1);
   let top = lh;
   let low = 0;
@@ -570,78 +578,90 @@ function castShadow(a, w, h, light) {
     }
   }
   const tall = Math.max(4, low - top);
-  // Feet: the lowest point within a short distance, so a raised foot or
-  // an arm doesn't count as standing on the ground.
+  // Feet: the lowest point within a short distance, so a raised foot or an
+  // arm doesn't count as standing on the ground.
   const reach = Math.max(2, Math.round(tall * 0.12));
   const foot = new Float32Array(lw).fill(-1);
   for (let x = 0; x < lw; x++) {
     for (let k = Math.max(0, x - reach); k <= Math.min(lw - 1, x + reach); k++) foot[x] = Math.max(foot[x], bottom[k]);
   }
 
-  // Throw every subject pixel onto the ground (bilinear splat).
+  // Contact shadow: only the lowest part of the person (feet), smudged a
+  // little down. It is what makes someone stand ON the ground.
+  const near = new Float32Array(lw * lh);
+  const drop = Math.max(1, Math.round(tall * 0.015));
+  for (let y = 0; y < lh; y++) {
+    for (let x = 0; x < lw; x++) {
+      const v = al[y * lw + x];
+      if (v < 0.05 || foot[x] < 0) continue;
+      const up = foot[x] - y; // height above the feet
+      const wgt = Math.exp(-Math.max(0, up) / (tall * 0.05));
+      const ty = Math.min(lh - 1, y + drop);
+      near[ty * lw + x] = Math.max(near[ty * lw + x], v * wgt);
+    }
+  }
+  const contactSoft = gaussianBlur(near, lw, lh, Math.max(1.5, tall * 0.025));
+  for (let i = 0; i < contactSoft.length; i++) contactSoft[i] *= 0.55;
+  const result = { pad, width: W, height: H, contact: shadeImage(contactSoft, lw, lh), cast: null };
+  if (!light) return result;
+
+  // Cast shadow: throw every pixel onto the ground from its own feet.
+  const { kx, ky } = shadowShear(light);
   const raw = new Float32Array(lw * lh);
   const dist = new Float32Array(lw * lh);
-  const put = (qx, qy, v, d) => {
-    if (qx < 0 || qy < 0 || qx >= lw || qy >= lh) return;
-    const i = qy * lw + qx;
-    if (v > raw[i]) {
-      raw[i] = v;
-      dist[i] = d;
-    }
-  };
+  const spanX = 1 + Math.ceil(Math.abs(kx));
+  const spanY = 1 + Math.ceil(Math.abs(ky));
   for (let y = 0; y < lh; y++) {
     for (let x = 0; x < lw; x++) {
       const v = al[y * lw + x];
       if (v < 0.05 || foot[x] < 0) continue;
       const hgt = foot[x] - y;
       if (hgt < 0) continue;
-      const qx = x + hgt * kx;
-      const qy = foot[x] + hgt * ky;
-      const x0 = Math.floor(qx);
-      const y0 = Math.floor(qy);
+      const qx = Math.floor(x + hgt * kx);
+      const qy = Math.floor(foot[x] + hgt * ky);
       const d = hgt / tall;
-      // Fill a little footprint so stretched shadows have no gaps.
-      for (let oy = 0; oy <= 1 + Math.ceil(Math.abs(ky)); oy++) {
-        for (let ox = 0; ox <= 1 + Math.ceil(Math.abs(kx)); ox++) put(x0 + ox, y0 + oy, v, d);
+      // A small footprint so stretched shadows have no gaps.
+      for (let oy2 = 0; oy2 <= spanY; oy2++) {
+        const yy = qy + oy2;
+        if (yy < 0 || yy >= lh) continue;
+        for (let ox2 = 0; ox2 <= spanX; ox2++) {
+          const xx = qx + ox2;
+          if (xx < 0 || xx >= lw) continue;
+          const i = yy * lw + xx;
+          if (v > raw[i]) {
+            raw[i] = v;
+            dist[i] = d;
+          }
+        }
       }
     }
   }
-  const near = gaussianBlur(raw, lw, lh, Math.max(1, lh * 0.004));
-  const far = gaussianBlur(raw, lw, lh, Math.max(2, lh * 0.02));
-  const distSoft = gaussianBlur(dist, lw, lh, Math.max(2, lh * 0.03));
-  const out = new Float32Array(lw * lh);
-  const g = light.ground == null ? null : light.ground * lh;
-  for (let y = 0, i = 0; y < lh; y++) {
-    const onGround = g === null ? 1 : Math.min(1, Math.max(0, (y - g) / (lh * 0.03) + 0.5));
-    for (let x = 0; x < lw; x++, i++) {
-      const t = Math.min(1, distSoft[i]);
-      out[i] = (near[i] + (far[i] - near[i]) * t) * (1 - 0.4 * t) * onGround;
-    }
+  // Sharp near the feet, wider and lighter toward the end (penumbra).
+  const sharp = gaussianBlur(raw, lw, lh, Math.max(1, tall * 0.008));
+  const soft = gaussianBlur(raw, lw, lh, Math.max(2, tall * 0.05));
+  const distSoft = gaussianBlur(dist, lw, lh, Math.max(2, tall * 0.05));
+  const strength = light.strength ?? 0.5;
+  const cast = new Float32Array(lw * lh);
+  for (let i = 0; i < cast.length; i++) {
+    const t = Math.min(1, distSoft[i]);
+    cast[i] = (sharp[i] + (soft[i] - sharp[i]) * t) * (1 - 0.55 * t) * strength;
   }
-  return f < 1 ? resizePlane(out, lw, lh, w, h) : out;
+  result.cast = shadeImage(cast, lw, lh);
+  return result;
 }
 
-// Put the subject into a scene so it looks like it belongs there:
-// 1. cut-out with clean edges (see cutout; pass one in to save time),
-// 2. moved/resized as asked (transform: { scale, dx, dy }),
-// 3. colour and brightness matched a little toward the scene,
-// 4. "light wrap": the scene's light spills softly over the edges,
-// 5. soft contact shadow around and below the subject,
-// 6. the scene gets the same photo grain (noise) as the subject,
-// 7. optional sun (light: { angle, length, strength, ground }): a cast
-//    shadow on the ground, the sunny side of the person a little brighter
-//    and, with the sun behind them, a rim of light on their edges.
-export function placeOnScene(img, mask, scene, { cut, transform, light } = {}) {
+// The scene with the photo's grain, and the person colour-matched to it.
+// Both depend only on the photo and the scene, not on where the person is.
+export function sceneFit(img, mask, cut, scene) {
   const { width: w, height: h } = img;
   const n = w * h;
   const S = coverScene(scene, w, h);
-  const { image: layer, anchor } = cut || cutout(img, mask);
-  const warped = warpLayer(layer, anchor, transform);
-  const a = warped[3];
-  // Back from premultiplied colour.
-  const F = warped.slice(0, 3).map((p) => p.map((v, i) => (a[i] > 1e-3 ? v / a[i] : 0)));
+  const layer = cut.image;
+  const a = new Float32Array(n);
+  for (let i = 0; i < n; i++) a[i] = layer.data[i * 4 + 3] / 255;
+  const F = toPlanes(layer);
 
-  // 3. Colour and brightness: move part of the way toward the scene.
+  // Colour and brightness: move part of the way toward the scene.
   const mean = (planes, weight) => {
     const m = [0, 0, 0];
     let sw = 0;
@@ -661,59 +681,21 @@ export function placeOnScene(img, mask, scene, { cut, transform, light } = {}) {
     const tint = sm[c] / Math.max(lum(sm), 1) / (fm[c] / Math.max(lum(fm), 1) || 1);
     return gainL * clamp(Math.pow(tint, 0.3), 0.92, 1.08);
   });
-
-  // 4. Light wrap: blurred scene light on the subject's outer edge.
-  const aSoft = softBlur(a, w, h, 0.012);
-  const wrap = S.map((plane) => softBlur(plane, w, h, 0.012));
-
-  // 5. Contact shadow: a soft, slightly lowered copy of the subject.
-  const shift = Math.round(h * 0.012);
-  const lowered = new Float32Array(n);
-  lowered.set(a.subarray(0, n - shift * w), shift * w);
-  const shadow = softBlur(lowered, w, h, 0.025);
-
-  // 7. Sun: cast shadow plus light on the person.
-  let sun = null;
-  if (light) {
-    const strength = light.strength ?? 0.55;
-    const t = ((light.angle ?? 0) * Math.PI) / 180;
-    // Sunlight colour: the scene's brightest 2 % (sky, sun, highlights).
-    const lumS = new Float32Array(n);
-    for (let i = 0; i < n; i++) lumS[i] = 0.299 * S[0][i] + 0.587 * S[1][i] + 0.114 * S[2][i];
-    const sample = [];
-    for (let i = 0; i < n; i += 11) sample.push(lumS[i]);
-    sample.sort((x, y) => x - y);
-    const bright = sample[Math.floor(sample.length * 0.98)];
-    const hl = [0, 0, 0];
-    let cnt = 0;
-    for (let i = 0; i < n; i += 11) {
-      if (lumS[i] < bright) continue;
-      for (let c = 0; c < 3; c++) hl[c] += S[c][i];
-      cnt++;
+  // Soft edges pick up a little of the scene's colour (light wrap).
+  const aSoft = softBlur(a, w, h, 0.01);
+  const subject = makeImage(w, h);
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const edge = a[i] * (1 - aSoft[i]);
+    for (let c = 0; c < 3; c++) {
+      const f = F[c][i] * gains[c];
+      subject.data[j + c] = f + 0.5 * edge * (sm[c] - f);
     }
-    // Where the person is, to know their sunny side.
-    let x0 = w;
-    let x1 = 0;
-    for (let i = 0; i < n; i += 3) {
-      if (a[i] < 0.5) continue;
-      const x = i % w;
-      if (x < x0) x0 = x;
-      if (x > x1) x1 = x;
-    }
-    sun = {
-      strength,
-      cast: castShadow(a, w, h, light),
-      sunX: -Math.sin(t), // +1: sun on the right
-      back: Math.cos(t), // +1: sun behind the person
-      cx: (x0 + x1) / 2,
-      half: Math.max(1, (x1 - x0) / 2),
-      highlight: hl.map((v) => Math.min(255, (v / Math.max(cnt, 1)) * 1.05)),
-    };
+    subject.data[j + 3] = layer.data[j + 3];
   }
 
-  // 6. Grain: the photo's sensor noise, measured on both the old
-  //    background and the subject; the smaller one is the noise (the
-  //    other also contains texture such as skin or foliage).
+  // Grain: the photo's sensor noise, measured on both the old background
+  // and the subject; the smaller one is the noise (the other also contains
+  // texture such as skin or foliage). Added to the scene.
   const L = luminance(img);
   const Lb = boxBlur(L, w, h, 1);
   const original = alphaOf(img, mask);
@@ -726,34 +708,141 @@ export function placeOnScene(img, mask, scene, { cut, transform, light } = {}) {
   const noise = Math.min(median((v) => v < 0.05), median((v) => v > 0.95));
   const grain = Number.isFinite(noise) ? Math.min(5, 1.25 * noise) : 0;
   const random = rand(12345);
-
-  const out = makeImage(w, h);
-  const d = out.data;
-  // Shadows are a little blue (lit by the sky), so blue drops least.
-  const shadeTint = [1, 0.96, 0.86];
+  const sceneOut = makeImage(w, h);
   for (let i = 0, j = 0; i < n; i++, j += 4) {
-    const ai = a[i];
-    const edge = ai * (1 - aSoft[i]); // inside the subject, near its edge
-    const dark = 1 - 0.35 * shadow[i] * (1 - ai);
     const g = grain ? (random() + random() + random() - 1.5) * grain * 1.4 : 0;
-    let gain = 1;
-    let rim = 0;
-    if (sun) {
-      const side = Math.max(-1, Math.min(1, ((i % w) - sun.cx) / sun.half)) * sun.sunX; // +1: facing the sun
-      gain = 1 + sun.strength * (0.12 * side - 0.1 * Math.max(sun.back, 0) + 0.06 * Math.max(-sun.back, 0));
-      rim = sun.strength * edge * Math.max(0, sun.back) * (0.6 + 0.4 * side) * 0.9;
-    }
+    sceneOut.data[j] = S[0][i] + g;
+    sceneOut.data[j + 1] = S[1][i] + g;
+    sceneOut.data[j + 2] = S[2][i] + g;
+    sceneOut.data[j + 3] = 255;
+  }
+  return { scene: sceneOut, subject };
+}
+
+// Sunlight on the person (light as in shadowShear): the side facing the
+// sun a little brighter, the front a little darker when the sun is behind
+// them, and then a warm rim of light on their edges.
+export function relight(subject, scene, light) {
+  const { width: w, height: h } = subject;
+  const n = w * h;
+  const { kx, ky } = shadowShear(light);
+  const len = Math.max(1e-6, Math.hypot(kx, ky));
+  const sunX = -kx / len; // +1: sun on the right
+  const back = ky / len; // +1: sun behind the person
+  const strength = light.strength ?? 0.5;
+  const a = new Float32Array(n);
+  for (let i = 0; i < n; i++) a[i] = subject.data[i * 4 + 3] / 255;
+  const aSoft = softBlur(a, w, h, 0.012);
+  let x0 = w;
+  let x1 = 0;
+  for (let i = 0; i < n; i += 3) {
+    if (a[i] < 0.5) continue;
+    const x = i % w;
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+  }
+  const cx = (x0 + x1) / 2;
+  const half = Math.max(1, (x1 - x0) / 2);
+  // Sunlight colour: the scene's brightest 2 % (sky, sun, highlights).
+  const sd = scene.data;
+  const lums = [];
+  for (let j = 0; j < sd.length; j += 44) lums.push(0.299 * sd[j] + 0.587 * sd[j + 1] + 0.114 * sd[j + 2]);
+  lums.sort((p, q) => p - q);
+  const bright = lums[Math.floor(lums.length * 0.98)];
+  const hl = [0, 0, 0];
+  let cnt = 0;
+  for (let j = 0; j < sd.length; j += 44) {
+    if (0.299 * sd[j] + 0.587 * sd[j + 1] + 0.114 * sd[j + 2] < bright) continue;
+    hl[0] += sd[j];
+    hl[1] += sd[j + 1];
+    hl[2] += sd[j + 2];
+    cnt++;
+  }
+  const highlight = hl.map((v) => Math.min(255, (v / Math.max(cnt, 1)) * 1.05));
+  const out = makeImage(w, h);
+  const d = subject.data;
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    out.data[j + 3] = d[j + 3];
+    if (a[i] === 0) continue;
+    const side = Math.max(-1, Math.min(1, ((i % w) - cx) / half)) * sunX; // +1: facing the sun
+    const gain = 1 + strength * (0.16 * side - 0.12 * Math.max(back, 0) + 0.06 * Math.max(-back, 0));
+    const edge = a[i] * (1 - aSoft[i]);
+    const rim = strength * edge * Math.max(0, back) * (0.6 + 0.4 * side) * 1.2;
     for (let c = 0; c < 3; c++) {
-      let f = F[c][i] * gains[c] * gain;
-      f += 0.6 * edge * (wrap[c][i] - f);
-      if (rim) f += rim * (sun.highlight[c] - f);
-      let b = S[c][i] * dark + g;
-      if (sun) b *= 1 - sun.strength * 0.8 * sun.cast[i] * shadeTint[c];
-      d[j + c] = f * ai + b * (1 - ai);
+      const f = d[j + c] * gain;
+      out.data[j + c] = f + Math.min(1, rim) * (highlight[c] - f);
     }
-    d[j + 3] = 255;
   }
   return out;
+}
+
+// Stack the layers like the app's canvas: scene, shadows (multiply, cast
+// shadow only below `ground`), person; moved/resized by transform.
+export function composeScene(layers, cut, { transform = {}, ground = null } = {}) {
+  const { scene, subject, shadows } = layers;
+  const { width: w, height: h } = scene;
+  const n = w * h;
+  const { scale = 1, dx = 0, dy = 0 } = transform;
+  const { x: ax, y: ay } = cut.anchor;
+  const out = makeImage(w, h, Uint8ClampedArray.from(scene.data));
+  const d = out.data;
+  // Output pixel -> cut-out coordinates.
+  const toCut = (x, y) => [(x - dx - ax) / scale + ax, (y - dy - ay) / scale + ay];
+  const sample = (img, u, v) => {
+    if (u < 0 || v < 0 || u > img.width - 1 || v > img.height - 1) return null;
+    const x0 = Math.floor(u);
+    const y0 = Math.floor(v);
+    const x1 = Math.min(img.width - 1, x0 + 1);
+    const y1 = Math.min(img.height - 1, y0 + 1);
+    const tx = u - x0;
+    const ty = v - y0;
+    const px = [0, 0, 0, 0];
+    for (let c = 0; c < 4; c++) {
+      const at = (xx, yy) => img.data[(yy * img.width + xx) * 4 + c];
+      const top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * tx;
+      const bot = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * tx;
+      px[c] = top + (bot - top) * ty;
+    }
+    return px;
+  };
+  const sh = shadows;
+  const k = sh.contact.width / sh.width; // shadow layer pixels per photo pixel
+  const groundY = ground === null ? -Infinity : ground * h;
+  const band = h * 0.04; // shadows fade in over this band below the horizon
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const [u, v] = toCut(x, y);
+      const j = (y * w + x) * 4;
+      const su = (u + sh.pad.x) * k;
+      const sv = (v + sh.pad.y) * k;
+      const fade = Math.min(1, Math.max(0, (y - groundY) / band + 0.2));
+      for (const img of [sh.contact, fade > 0 ? sh.cast : null]) {
+        if (!img) continue;
+        const p = sample(img, su, sv);
+        if (!p) continue;
+        const al = (p[3] / 255) * (img === sh.cast ? fade : 1);
+        for (let c = 0; c < 3; c++) d[j + c] *= 1 - al * (1 - p[c] / 255);
+      }
+      const p = sample(subject, u, v);
+      if (!p) continue;
+      const al = p[3] / 255;
+      for (let c = 0; c < 3; c++) d[j + c] = p[c] * al + d[j + c] * (1 - al);
+    }
+  }
+  return out;
+}
+
+// One call that does it all (used by composite and the tests).
+// light: as in shadowShear plus { strength, ground } or null.
+export function placeOnScene(img, mask, scene, { cut, transform, light } = {}) {
+  cut = cut || cutout(img, mask);
+  const fit = sceneFit(img, mask, cut, scene);
+  const layers = {
+    scene: fit.scene,
+    subject: light ? relight(fit.subject, fit.scene, light) : fit.subject,
+    shadows: shadowLayers(cut, light || null),
+  };
+  return composeScene(layers, cut, { transform, ground: light ? light.ground ?? null : null });
 }
 
 // ---------- text ----------

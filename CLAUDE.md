@@ -74,7 +74,8 @@ tests/                 node tests + Playwright browser test (dev only)
 
 `engine/engine.js` exports `engine` with `sharpen`, `autoEnhance`,
 `enhanceText`, `segment` (AI mask), `cutout` (subject layer with clean
-edges), `composite` (new background) and `isModelCached`.
+edges), `sceneFit` / `shadows` / `relight` (scene layers, see Scenes),
+`composite` (new background) and `isModelCached`.
 Images are plain `{ width, height, data }` RGBA objects. Today each call is
 a message to `engine/worker.js`. In phase 3 a second transport can send the
 same calls to the PC instead; the app shouldn't need to change. Keep all
@@ -157,33 +158,38 @@ on extreme blur later (see roadmap).
 - `ops.cutout` makes the subject layer once per photo: alpha corrected by
   colour where the AI mask spills onto the old background, edge colours
   solved/filled from inside the subject (no halo), anchor = bottom centre.
-- `ops.placeOnScene(img, mask, scene, { cut, transform })`: scene cropped
-  to cover the frame (`coverScene`, same crop as the app's `coverImage`),
-  subject moved/resized (`transform: { scale, dx, dy }`, scaled around
-  the anchor, premultiplied resampling), colour and brightness nudged
-  toward the scene, light wrap, soft contact shadow, and the photo's
-  noise (measured on smooth areas) added to the scene as grain.
-- **Sun & shadow** (option, off by default; `light` in placeOnScene):
-  - Cast shadow: each subject pixel is thrown onto the ground from its own
-    feet (lowest point within ~12 % of the subject's height, so two people
-    at different distances each start at their own feet), along
-    `shadowShear({ angle, length })` (0° = toward the viewer, 90° = right,
-    180° = away; ground seen at a slant, side shadows never thinner than
-    0.3). Sharp at the feet, softer and fainter further away, slightly
-    blue, and only below the scene's ground line.
-  - On the person: sunny side up to 12 % brighter, front slightly darker
-    when the sun is behind them, plus a rim light in the scene's highlight
-    colour (its brightest 2 %).
-  - Per-scene defaults in app.js `SCENE_SUN` (angle, length, strength,
-    ground as a fraction of the scene height, mapped through the cover
-    crop). "Your photo" has no ground line.
-  - Preview: the app draws the silhouette with the same affine shear on a
-    canvas (instant while sliding); the engine's full fit follows.
+- **Scenes are layers** (ops.js "scenes as layers"), so editing is
+  instant: `sceneFit` (scene with the photo's grain + person colour-matched
+  with a little light wrap; once per scene), `shadowLayers` (contact shadow
+  under the feet + optional cast shadow, low-res RGBA in the cut-out's
+  coordinates, padded by half a frame so shadows can leave the original
+  photo; drawn with "multiply" in a slightly blue shade colour), `relight`
+  (sun on the person). The app keeps them as canvases and `drawStack`
+  redraws scene → shadows → person with the person's transform (scale
+  around the anchor + shift). A ground shadow transforms exactly like the
+  person, so moving/resizing needs no engine work at all. Apply saves the
+  same stack drawn at full size (`renderStack`). `composeScene` /
+  `placeOnScene` do the same stacking in JS for the engine API and tests.
+- **Sun & shadow** (option, off by default). `light = { kx, ky, strength }`:
+  the shadow of the top of the person lands (kx, ky) person-heights from
+  the feet (kx right, ky toward the viewer); `shadowShear` also accepts
+  { angle, length }. Each pixel is thrown from its own feet (lowest point
+  within ~12 % of the height, so two people at different distances start
+  at their own feet). Sharp and darkest at the feet, wider and lighter
+  toward the end. Only below the scene's horizon (`SCENE_SUN.ground`,
+  fraction of the scene height mapped through the cover crop), faded in
+  over 4 % of the height. Relight: sunny side up to 16 % brighter, front
+  darker when backlit, rim light in the scene's highlight colour.
+  - UI: Sun toggle, a Darkness slider, and a yellow dot at the shadow's
+    end that you drag to aim it (kept inside the picture). While dragging,
+    only the shadow layer is recomputed (640 px, latest-wins); relight
+    runs on release.
+  - Half-body photos (bottom edge cuts through >30 % of the body's width,
+    `measureCut`): no contact or ground shadow (it would be a slab under
+    the cut), only the light on the person; the hint says so.
 - Placing (app.js): drag with one finger, pinch with two, or the Size
-  slider (resizes around the bottom centre), plus Reset. While moving, the
-  cut-out is just drawn over the scene on a canvas (instant); when you let
-  go the engine does the full fit (~1-2 s) and replaces the preview. Apply
-  waits for the fit of the final position.
+  slider (resizes around the bottom centre), plus Reset. Redraws are
+  batched with requestAnimationFrame.
 
 ### Saving
 

@@ -97,6 +97,9 @@ const handlers = {
   enhanceText: ({ image, mode, strength }) => ops.enhanceText(image, { mode, strength }),
   composite: ({ image, mask, background }) => ops.composite(image, mask, background),
   cutout: ({ image, mask }) => ops.cutout(image, mask),
+  sceneFit: ({ image, mask, cut, scene }) => ops.sceneFit(image, mask, cut, scene),
+  shadows: ({ cut, light }) => ops.shadowLayers(cut, light),
+  relight: ({ subject, scene, light }) => ops.relight(subject, scene, light),
   async segment({ image }, report) {
     // People first: MODNet gives soft, hair-level edges.
     const modnet = await loadSession('modnet', report);

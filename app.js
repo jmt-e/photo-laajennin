@@ -1,4 +1,4 @@
-import { engine, shadowShear } from './engine/engine.js';
+import { engine } from './engine/engine.js';
 
 const MAX_SIDE = 2048; // keeps Safari fast and within its memory limits
 const MAX_HISTORY = 10; // each step is ~12 MB at full size
@@ -39,11 +39,10 @@ const el = {
   sceneSize: $('scene-size'),
   sceneReset: $('scene-reset'),
   sunToggle: $('sun-toggle'),
-  sunAngle: $('sun-angle'),
-  sunOffNote: $('sun-off-note'),
-  sunLengthRow: $('sun-length-row'),
-  sunLength: $('sun-length'),
-  sunDirLabel: $('sun-dir-label'),
+  sunStrength: $('sun-strength'),
+  sunNote: $('sun-note'),
+  sunHandle: $('sun-handle'),
+  sceneHint: $('scene-hint'),
   sceneFile: $('scene-file'),
   bgCustom: $('bg-custom'),
   saveSheet: $('save-sheet'),
@@ -127,7 +126,8 @@ function render() {
   el.empty.hidden = Boolean(img);
   el.frame.hidden = !img;
   if (!img) return;
-  paint(el.after, img);
+  if (placing() && !state.preview) drawPlacement();
+  else paint(el.after, img);
   layout();
   renderCompare();
   updateButtons();
@@ -439,26 +439,43 @@ async function previewBg() {
 }
 
 // ---------- scenes: place the person ----------
-// While you drag or pinch, the cut-out is simply drawn over the scene
-// (instant). When you let go, the engine does the full fit (edges, colour,
-// light, shadow, grain) and that replaces the quick preview.
+// A scene picture is a stack of layers made by the engine: the scene, the
+// shadows and the person (see "scenes as layers" in engine/ops.js). Moving
+// the person or the shadow only redraws the stack on a canvas, so it
+// follows your finger, and Apply saves exactly what you see.
 
 const cuts = new WeakMap(); // image -> cut-out layer { image, anchor }
-const place = { base: null, cut: null, scene: null, sceneName: null, transform: { scale: 1, dx: 0, dy: 0 } };
-
-// Sun for each scene: where its light comes from (as the shadow direction,
-// see shadowShear: 0 = toward you), how long shadows are, and where the
-// ground starts (fraction of the scene's height; null = don't know).
-const SCENE_SUN = {
-  beach: { angle: 30, length: 0.8, strength: 0.55, ground: 0.72 },
-  'basketball-court': { angle: 0, length: 0.3, strength: 0.45, ground: 0.56 },
-  'soccer-stadium': { angle: -10, length: 1.4, strength: 0.5, ground: 0.5 },
-  scenery: { angle: -35, length: 0.7, strength: 0.55, ground: 0.78 },
-  own: { angle: 20, length: 0.7, strength: 0.5, ground: null },
+const place = {
+  base: null,
+  cut: null,
+  sceneName: null,
+  transform: { scale: 1, dx: 0, dy: 0 },
+  fit: null, // engine layers { scene, subject }
+  shadows: null, // engine shadow layers
+  canvas: null, // the same layers as canvases: { scene, subject, contact, cast }
+  ground: null, // where the ground starts in the frame (0..1), null = unknown
+  tall: 1, // the person's height in the cut-out, in pixels
+  feetCut: false, // the photo's bottom edge cuts through the person
 };
-const sun = { on: false, angle: 0, length: 0.7, strength: 0.5, ground: null };
+
+// Sun for each scene, as where the shadow of the top of the person lands
+// (from the feet, in person-heights: kx right, ky toward you), and the
+// horizon: where the ground (floor, sand, water, grass) meets the sky or
+// back wall, as a fraction of the scene's height (null = unknown).
+// Shadows only fall below it.
+const SCENE_SUN = {
+  beach: { kx: 0.4, ky: 0.35, ground: 0.64 },
+  'basketball-court': { kx: 0.05, ky: 0.18, ground: 0.55 },
+  'soccer-stadium': { kx: -0.2, ky: 0.75, ground: 0.49 },
+  scenery: { kx: -0.45, ky: 0.3, ground: 0.5 },
+  own: { kx: 0.35, ky: 0.3, ground: null },
+};
+const sun = { on: false, kx: 0.4, ky: 0.35, strength: 0.5 };
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 3;
+const PLACE_HINT = 'Drag to move · pinch or slide to resize';
+
+const sunLight = () => (sun.on ? { kx: sun.kx, ky: sun.ky, strength: sun.strength } : null);
 
 function canvasOf(img) {
   const c = document.createElement('canvas');
@@ -485,26 +502,53 @@ function coverImage(img, w, h) {
   return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data, where };
 }
 
-// The cut-out filled with black, for the instant shadow preview.
-function silhouetteOf(canvas) {
-  const c = document.createElement('canvas');
-  c.width = canvas.width;
-  c.height = canvas.height;
-  const ctx = c.getContext('2d');
-  ctx.drawImage(canvas, 0, 0);
-  ctx.globalCompositeOperation = 'source-in';
-  ctx.fillStyle = '#00030a';
-  ctx.fillRect(0, 0, c.width, c.height);
-  return c;
-}
-
-function sunLight() {
-  if (!sun.on) return null;
-  return { angle: sun.angle, length: sun.length, strength: sun.strength, ground: sun.ground };
-}
-
 function placing() {
-  return state.panel === 'bg' && bgChoice.type === 'scene' && place.cut !== null && place.base === current();
+  return state.panel === 'bg' && bgChoice.type === 'scene' && place.canvas !== null && place.base === current();
+}
+
+// Cut-out coordinates -> picture coordinates (moved and resized).
+function toPicture(u, v) {
+  const { scale, dx, dy } = place.transform;
+  const { x: ax, y: ay } = place.cut.anchor;
+  return [(u - ax) * scale + ax + dx, (v - ay) * scale + ay + dy];
+}
+
+function drawStack(ctx, w, h) {
+  const L = place.canvas;
+  const { scale } = place.transform;
+  ctx.drawImage(L.scene, 0, 0, w, h);
+  const sh = place.shadows;
+  const [sx, sy] = toPicture(-sh.pad.x, -sh.pad.y);
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  // No feet in the photo (cut off at the bottom): a ground shadow would be
+  // a slab under the cut, so only the sunlight on the person is used.
+  if (!place.feetCut) ctx.drawImage(L.contact, sx, sy, sh.width * scale, sh.height * scale);
+  if (L.cast && !place.feetCut) {
+    const dw = sh.width * scale;
+    const dh = sh.height * scale;
+    if (place.ground === null) ctx.drawImage(L.cast, sx, sy, dw, dh);
+    else {
+      // Fade in over a band below the horizon instead of a hard cut:
+      // a few strips, each a little more opaque.
+      const top = place.ground * h;
+      const band = h * 0.04;
+      const steps = 4;
+      for (let k = 0; k <= steps; k++) {
+        ctx.save();
+        ctx.beginPath();
+        const y0 = top + (band * k) / steps;
+        ctx.rect(0, y0, w, k < steps ? band / steps : h - y0);
+        ctx.clip();
+        ctx.globalAlpha = (k + 1) / (steps + 1);
+        ctx.drawImage(L.cast, sx, sy, dw, dh);
+        ctx.restore();
+      }
+    }
+  }
+  ctx.restore();
+  const [px, py] = toPicture(0, 0);
+  ctx.drawImage(L.subject, px, py, w * scale, h * scale);
 }
 
 function drawPlacement() {
@@ -513,106 +557,155 @@ function drawPlacement() {
     el.after.width = w;
     el.after.height = h;
   }
-  const ctx = el.after.getContext('2d');
-  ctx.drawImage(place.sceneCanvas, 0, 0);
-  const { scale, dx, dy } = place.transform;
-  const { x: ax, y: ay } = place.cut.anchor;
-  const x = ax * (1 - scale) + dx;
-  const y = ay * (1 - scale) + dy;
+  drawStack(el.after.getContext('2d'), w, h);
+  el.sceneSize.value = String(Math.round(place.transform.scale * 100));
+  // The shadow-end handle: where the shadow of the top of the person lands.
+  el.sunHandle.hidden = !sun.on;
   if (sun.on) {
-    // The cast shadow is the silhouette slanted onto the ground (an affine
-    // map, see shadowShear); the engine's full fit adds soft ends and light.
-    const { kx, ky } = shadowShear(sun);
-    const fy = ay + dy; // the feet
-    ctx.save();
-    if (sun.ground !== null) {
-      ctx.beginPath();
-      ctx.rect(0, sun.ground * h, w, h);
-      ctx.clip();
-    }
-    ctx.setTransform(1, 0, -kx, -ky, kx * fy, fy * (1 + ky));
-    ctx.filter = `blur(${Math.max(1, Math.round(h * 0.005))}px)`;
-    ctx.globalAlpha = sun.strength * 0.7;
-    ctx.drawImage(place.silhouetteCanvas, x, y, w * scale, h * scale);
-    ctx.restore();
+    const { x: ax, y: ay } = place.cut.anchor;
+    const [hx, hy] = toPicture(ax + sun.kx * place.tall, ay + sun.ky * place.tall);
+    // Always reachable: kept inside the picture even if the shadow ends outside.
+    const clamp = (v) => Math.min(96, Math.max(4, v));
+    el.sunHandle.style.left = `${clamp((hx / w) * 100)}%`;
+    el.sunHandle.style.top = `${clamp((hy / h) * 100)}%`;
   }
-  ctx.drawImage(place.subjectCanvas, x, y, w * scale, h * scale);
-  el.sceneSize.value = String(Math.round(scale * 100));
+}
+
+// Redraw at most once per screen frame.
+let drawQueued = false;
+function scheduleDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => {
+    drawQueued = false;
+    if (placing()) drawPlacement();
+  });
+}
+
+// The final picture, drawn the same way at full size.
+function renderStack() {
+  const { width: w, height: h } = place.base;
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  drawStack(ctx, w, h);
+  const out = { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
+  c.width = c.height = 0;
+  return out;
+}
+
+function setShadows(shadows) {
+  place.shadows = shadows;
+  place.canvas.contact = canvasOf(shadows.contact);
+  place.canvas.cast = shadows.cast ? canvasOf(shadows.cast) : null;
+}
+
+// How tall the person is, and whether the photo's edge cuts them off.
+// A body cut off by the bottom edge (half-body photo) is wide there; a
+// shoe touching the edge is not.
+function measureCut(cut) {
+  const { width: w, height: h, data } = cut.image;
+  let top = h;
+  let left = w;
+  let right = 0;
+  let edge = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (data[(y * w + x) * 4 + 3] < 128) continue;
+      if (y < top) top = y;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y === h - 1) edge++;
+    }
+  }
+  return { tall: Math.max(1, cut.anchor.y - top), feetCut: edge > Math.max(1, right - left) * 0.3 };
 }
 
 async function previewScene() {
   const base = current();
-  const ready = await run('Cutting out…', async () => {
+  const ready = await run('Fitting into the scene…', async () => {
     if (!cuts.has(base)) cuts.set(base, await engine.cutout(base, masks.get(base)));
+    const cut = cuts.get(base);
     const img = await sceneImage(bgChoice.scene);
-    if (place.base !== base) place.transform = { scale: 1, dx: 0, dy: 0 };
-    place.base = base;
-    place.cut = cuts.get(base);
-    place.sceneName = bgChoice.scene;
     const covered = coverImage(img, base.width, base.height);
-    place.scene = { width: covered.width, height: covered.height, data: covered.data };
-    place.subjectCanvas = canvasOf(place.cut.image);
-    place.silhouetteCanvas = silhouetteOf(place.subjectCanvas);
-    place.sceneCanvas = canvasOf(place.scene);
+    const sceneImg = { width: covered.width, height: covered.height, data: covered.data };
     // Each scene starts with its own sun (on/off stays as you chose).
     const preset = SCENE_SUN[bgChoice.scene] || SCENE_SUN.own;
-    Object.assign(sun, preset, { ground: preset.ground === null ? null : covered.where(preset.ground) });
-    showSun();
+    sun.kx = preset.kx;
+    sun.ky = preset.ky;
+    const fit = await engine.sceneFit(base, masks.get(base), cut, sceneImg);
+    const shadows = await engine.shadows(cut, sunLight());
+    const subject = sun.on ? await engine.relight(fit.subject, fit.scene, sunLight()) : fit.subject;
+    if (place.base !== base) place.transform = { scale: 1, dx: 0, dy: 0 };
+    Object.assign(place, { base, cut, sceneName: bgChoice.scene, fit, ...measureCut(cut) });
+    place.ground = preset.ground === null ? null : covered.where(preset.ground);
+    place.canvas = { scene: canvasOf(fit.scene), subject: canvasOf(subject) };
+    setShadows(shadows);
     return true;
   });
   if (!ready || state.panel !== 'bg' || current() !== base) return;
   state.preview = null;
+  showSun();
   layout();
   drawPlacement();
   updatePlacing();
-  fitScene();
+  setStatus(PLACE_HINT);
 }
 
-// Full-quality fit for the current place; never more than one waiting.
-let fitJob = null;
-let fitAgain = false;
-// What the picture depends on: if this changed meanwhile, a finished fit is stale.
-const fitKey = () => JSON.stringify([place.transform, sunLight(), place.sceneName]);
-
-function fitScene() {
-  if (fitJob) {
-    fitAgain = true;
-    return;
-  }
-  fitJob = (async () => {
+// Engine jobs for the sun; a newer request replaces a waiting one.
+function latest(job) {
+  let running = null;
+  let again = false;
+  const loop = async () => {
     do {
-      fitAgain = false;
-      const key = fitKey();
-      const { base } = place;
-      setStatus('Fitting in…');
+      again = false;
       try {
-        const out = await engine.composite(base, masks.get(base), {
-          type: 'scene',
-          scene: place.scene,
-          cut: place.cut,
-          transform: { ...place.transform },
-          light: sunLight(),
-        });
-        if (placing() && key === fitKey()) {
-          state.preview = out;
-          render();
-          setStatus('Drag to move · pinch to resize');
-        }
+        await job();
       } catch (err) {
         setStatus(err.message, true);
       }
-    } while (fitAgain && placing());
-  })().finally(() => {
-    fitJob = null;
-  });
+    } while (again && placing());
+  };
+  return {
+    request() {
+      if (running) {
+        again = true;
+        return;
+      }
+      running = loop().finally(() => {
+        running = null;
+      });
+    },
+    done: async () => {
+      while (running) await running;
+    },
+  };
 }
 
+const shadowUpdate = latest(async () => {
+  const shadows = await engine.shadows(place.cut, sunLight());
+  if (!placing()) return;
+  setShadows(shadows);
+  scheduleDraw();
+});
+
+const lightUpdate = latest(async () => {
+  const light = sunLight();
+  const subject = light ? await engine.relight(place.fit.subject, place.fit.scene, light) : place.fit.subject;
+  if (!placing()) return;
+  place.canvas.subject = canvasOf(subject);
+  scheduleDraw();
+  setStatus(sun.on ? 'Drag the yellow dot to aim the shadow' : PLACE_HINT);
+});
+
 previews.bg = {
-  // Apply: make sure the full fit of the final place is done.
+  // Apply: wait for the latest sun update, then save what you see.
   async settled() {
     if (!placing()) return;
-    if (!state.preview && !fitJob) fitScene();
-    while (fitJob) await fitJob;
+    await shadowUpdate.done();
+    await lightUpdate.done();
+    state.preview = renderStack();
   },
 };
 
@@ -620,6 +713,7 @@ function updatePlacing() {
   const on = placing();
   el.frame.classList.toggle('placing', on);
   el.scenePlace.hidden = !on;
+  if (!on) el.sunHandle.hidden = true;
 }
 
 // Drag with one finger, pinch with two. Positions are in image pixels.
@@ -641,7 +735,6 @@ el.frame.addEventListener('pointerdown', (e) => {
   if (!placing() || state.comparing || state.busy) return;
   el.frame.setPointerCapture(e.pointerId);
   fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  state.preview = null;
   startGesture();
 });
 
@@ -665,7 +758,7 @@ el.frame.addEventListener('pointermove', (e) => {
     const sy = (c0.y - ay - t0.dy) / t0.scale + ay;
     place.transform = { scale, dx: c1.x - ax - (sx - ax) * scale, dy: c1.y - ay - (sy - ay) * scale };
   }
-  drawPlacement();
+  scheduleDraw();
 });
 
 function endFinger(e) {
@@ -673,7 +766,7 @@ function endFinger(e) {
   if (fingers.size) startGesture();
   else {
     gesture = null;
-    fitScene();
+    setStatus(sun.on ? 'Drag the yellow dot to aim the shadow' : PLACE_HINT);
   }
 }
 el.frame.addEventListener('pointerup', endFinger);
@@ -682,56 +775,76 @@ el.frame.addEventListener('pointercancel', endFinger);
 // The size slider (one-handed alternative to pinching).
 el.sceneSize.addEventListener('input', () => {
   if (!placing()) return;
-  state.preview = null;
   place.transform = { ...place.transform, scale: Number(el.sceneSize.value) / 100 };
-  drawPlacement();
+  scheduleDraw();
 });
-el.sceneSize.addEventListener('change', () => placing() && fitScene());
-
-// Sun and shadow (an option). Sliders move the shadow instantly; the
-// full fit follows when you let go.
-const ARROWS = ['↓', '↘', '→', '↗', '↑', '↖', '←', '↙'];
-
-function showSun() {
-  el.sunToggle.setAttribute('aria-pressed', String(sun.on));
-  el.sunAngle.hidden = !sun.on;
-  el.sunOffNote.hidden = sun.on;
-  el.sunLengthRow.hidden = !sun.on;
-  el.sunAngle.value = String(Math.round(sun.angle));
-  el.sunLength.value = String(Math.round(sun.length * 100));
-  el.sunDirLabel.textContent = `Shadow ${ARROWS[(((Math.round(sun.angle / 45) % 8) + 8) % 8)]}`;
-}
-
-function sunChanged(final) {
-  if (!placing()) return;
-  state.preview = null;
-  showSun();
-  drawPlacement();
-  if (final) fitScene();
-}
-
-el.sunToggle.addEventListener('click', () => {
-  sun.on = !sun.on;
-  sunChanged(true);
-});
-el.sunAngle.addEventListener('input', () => {
-  sun.angle = Number(el.sunAngle.value);
-  sunChanged(false);
-});
-el.sunLength.addEventListener('input', () => {
-  sun.length = Number(el.sunLength.value) / 100;
-  sunChanged(false);
-});
-el.sunAngle.addEventListener('change', () => sunChanged(true));
-el.sunLength.addEventListener('change', () => sunChanged(true));
+el.sceneSize.addEventListener('change', () => placing() && setStatus(PLACE_HINT));
 
 el.sceneReset.addEventListener('click', () => {
   if (!placing()) return;
-  state.preview = null;
   place.transform = { scale: 1, dx: 0, dy: 0 };
-  drawPlacement();
-  fitScene();
+  scheduleDraw();
+  setStatus(PLACE_HINT);
 });
+
+// ----- sun and shadow (an option) -----
+// Drag the yellow dot (the end of the shadow) to aim it; the slider sets
+// how dark it is.
+
+function showSun() {
+  el.sunToggle.setAttribute('aria-pressed', String(sun.on));
+  el.sunStrength.hidden = !sun.on;
+  el.sunNote.textContent = sun.on ? 'Darkness' : 'Shadow and sunlight';
+  el.sunStrength.value = String(Math.round(sun.strength * 100));
+  el.sceneHint.textContent = !sun.on
+    ? PLACE_HINT
+    : place.feetCut
+      ? 'No feet in this photo, so no ground shadow: the sun lights the person. Drag the dot to move the light.'
+      : 'Drag the yellow dot to where the shadow should end';
+}
+
+el.sunToggle.addEventListener('click', () => {
+  if (!placing()) return;
+  sun.on = !sun.on;
+  showSun();
+  shadowUpdate.request();
+  lightUpdate.request();
+  scheduleDraw();
+});
+
+el.sunStrength.addEventListener('input', () => {
+  sun.strength = Number(el.sunStrength.value) / 100;
+  shadowUpdate.request();
+});
+el.sunStrength.addEventListener('change', () => lightUpdate.request());
+
+el.sunHandle.addEventListener('pointerdown', (e) => {
+  if (!placing()) return;
+  e.stopPropagation(); // not a person drag
+  el.sunHandle.setPointerCapture(e.pointerId);
+});
+
+el.sunHandle.addEventListener('pointermove', (e) => {
+  if (!el.sunHandle.hasPointerCapture(e.pointerId)) return;
+  // Where the finger is, in the cut-out's coordinates, relative to the feet.
+  const p = toImage({ x: e.clientX, y: e.clientY });
+  const { scale, dx, dy } = place.transform;
+  const { x: ax, y: ay } = place.cut.anchor;
+  let kx = (p.x - dx - ax) / scale / place.tall;
+  let ky = (p.y - dy - ay) / scale / place.tall;
+  const len = Math.hypot(kx, ky);
+  if (len > 2.5) {
+    kx *= 2.5 / len;
+    ky *= 2.5 / len;
+  }
+  sun.kx = kx;
+  sun.ky = ky;
+  shadowUpdate.request();
+  scheduleDraw();
+});
+
+el.sunHandle.addEventListener('pointerup', () => lightUpdate.request());
+el.sunHandle.addEventListener('pointercancel', () => lightUpdate.request());
 
 el.background.addEventListener('click', async () => {
   const base = current();
